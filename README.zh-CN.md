@@ -30,9 +30,9 @@
 
 ## 可选投递小鸟浮层（macOS）
 
-运行 `sh overlay/build.sh` 构建 AppKit 浮层。稳定安装需设置 `COURIER_SIGN_IDENTITY` 并运行 `sh overlay/build.sh --install`；固定路径是 `~/Applications/courier-overlay.app`，bundle ID 是 `tech.marave.courier-overlay`。fenn 在系统设置中给这个 App 开启「辅助功能」；未授权时浮层隐藏且不弹窗。`overlay status` 可读授权状态。不安装 launchd；配对存在期间运行，所有配对消失 3 秒后退出。
+运行 `sh overlay/build.sh` 构建 AppKit 浮层。三帧 SVG 是素材源，构建时由 macOS `sips` 光栅化为 2× 位图，以降低运行内存。稳定安装需设置 `COURIER_SIGN_IDENTITY` 并运行 `sh overlay/build.sh --install`；固定路径是 `~/Applications/courier-overlay.app`，bundle ID 是 `tech.marave.courier-overlay`。fenn 在系统设置中给这个 App 开启「辅助功能」；未授权时浮层隐藏且不弹窗。`overlay status` 可读授权状态。App 常驻菜单栏，提供显示开关、只读配对列表、默认关闭的登录时启动和退出；无配对时只等待文件变更，不轮询或读取 AX。
 
-透明浮层点击穿透，不能成为 key window，不移动鼠标。浮层进程通过 AX 定位侧栏会话行，并在窗口移动、侧栏变化时重查。查找规则：Codex 在 `AXList` 下找标题以五位编号加空格开头的 `AXButton`；Claude 在 `AXWebArea` 下找标题以四位编号加空格开头、距窗口左侧不超过 320 pt 且宽不超过 320 pt 的 `AXButton`。重复 frame 去重，只显示屏幕内且处于滚动区可见范围的行。定位结果记入 `$COURIER_STATE_DIR/overlay/locate.log`。任一端看不到就隐藏，恢复后回到当前驻点。
+透明浮层点击穿透，不能成为 key window，不移动鼠标。浮层进程通过 AX 定位侧栏会话行，并在窗口移动、侧栏变化时重查。查找规则：Codex 在 `AXList` 下找标题以五位编号加空格开头的 `AXButton`；Claude 在 `AXWebArea` 下找标题以四位编号加空格开头、距窗口左侧不超过 320 pt 且宽不超过 320 pt 的 `AXButton`。重复 frame 去重，只取屏幕与滚动区可见行，再用行内标题 `AXStaticText` 的 frame 把鸟停在编号首字左侧 2 pt。每对画直线、两个圈，飞行 2.5 秒，翅膀用三帧切换。定位结果记入 `$COURIER_STATE_DIR/overlay/locate.log`。任一端看不到就隐藏，恢复后回到当前驻点。菜单开关写入 `$COURIER_STATE_DIR/overlay/config.json`。
 
 Claude Computer use 发送前，运行 `python3 -I skills/courier/scripts/courier.py overlay pair --from 'Claude Code·0064' --to 'Codex·00165' --state sending`；Codex→Codex 也支持。控制端直接读 Codex 日志推进状态，`watch`、`verify`、`wait` 也会更新。`COURIER_OVERLAY=0` 关闭浮层。测试可设置 `COURIER_OVERLAY_PROBE=<路径>` 记录前台 PID、浮层 PID 与 key window；前台切换归因仍需结合操作记录。DSH 属于第二期。
 

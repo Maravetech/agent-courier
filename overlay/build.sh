@@ -3,8 +3,14 @@ set -eu
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 app="$here/build/courier-overlay.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-swiftc -O -framework AppKit "$here/SidebarLocator.swift" "$here/CourierOverlay.swift" -o "$app/Contents/MacOS/courier-overlay"
-cp "$here/../.claude-plugin/icon.png" "$app/Contents/Resources/icon.png"
+swiftc -O -framework AppKit -framework ServiceManagement "$here/SidebarLocator.swift" "$here/CourierOverlay.swift" -o "$app/Contents/MacOS/courier-overlay"
+cp "$here"/assets/bird-*.svg "$app/Contents/Resources/"
+for source in "$here"/assets/bird-*.svg; do
+  name=$(basename "$source" .svg)
+  sed 's/width="36" height="36"/width="72" height="72"/' "$source" > "$app/Contents/Resources/$name-2x.svg"
+  sips -s format png -o "$app/Contents/Resources/$name.png" "$app/Contents/Resources/$name-2x.svg" >/dev/null
+  rm "$app/Contents/Resources/$name-2x.svg"
+done
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -2,7 +2,7 @@
 
 ## 0.4.0
 
-- Optional macOS bird overlay anchors to Claude or Codex sidebar conversation rows through Accessibility, flies between rows, and remains at the sender's row after a reply.
+- Optional macOS bird overlay anchors 2 pt before Claude or Codex sidebar conversation numbers through Accessibility. Each pair has two rings, one straight line, and a three-frame bird that flies for 2.5 seconds. A persistent menu-bar switch lists pairs and offers opt-in launch at login; idle mode has no AX polling.
 - `overlay pair` supports Computer use deliveries; `ui-send`, `verify`, `wait`, and `watch` update the visual state automatically. `COURIER_OVERLAY=0` disables it.
 - Per-app AX rules, visible-row filtering, duplicate-frame selection, and `locate.log` track anchors. A test-only focus probe records the overlay's PID, foreground app, and key-window state.
 - Use the shared brand bird icon from the local 0.2.2 icon update; the remote release was already 0.3.0 when this feature branch was started.

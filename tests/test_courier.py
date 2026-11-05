@@ -972,6 +972,15 @@ class CourierTest(unittest.TestCase):
              patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")):
             self.assertEqual(overlay.codex_progress(pair), ("replied", ""))
 
+    def test_overlay_progress_imports_courier_in_isolated_process(self):
+        code = ("import importlib.util,sys; s=importlib.util.spec_from_file_location('overlay',sys.argv[1]); "
+                "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                "print(m.codex_progress({'to_app':'Codex','to':'99999'}))")
+        result = subprocess.run([sys.executable, "-I", "-c", code, OVERLAY_SCRIPT],
+                                env={**self.env, "CODEX_HOME": self.tmp.name}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "None")
+
     def test_overlay_emits_codex_to_codex(self):
         with patch.dict(os.environ, {"COURIER_OVERLAY": "1"}), patch.object(courier.subprocess, "run") as run:
             courier.overlay_emit("sending", "【投递】Codex·00159 → Codex·00160\nfixture")

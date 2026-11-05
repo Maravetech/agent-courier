@@ -110,6 +110,9 @@ def codex_progress(pair):
     """Read the recipient rollout directly; watch is not needed for visual state."""
     if pair["to_app"] != "Codex":
         return None
+    script_dir = str(Path(__file__).resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
     import courier
     rows = [row for row in courier.codex_index().values()
             if re.match(r"^" + re.escape(pair["to"]) + r"\s", row.get("thread_name", ""))]
@@ -150,6 +153,23 @@ def app_path():
     return INSTALLED_APP if INSTALLED_APP.is_file() else BUILT_APP
 
 
+def ensure_app():
+    app = app_path()
+    if not app.is_file():
+        return
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with (STATE_DIR / "app.lock").open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        rows = subprocess.run(["/bin/ps", "-axo", "command="], capture_output=True, text=True, timeout=5).stdout.splitlines()
+        if any(row == str(app) or row.startswith(str(app) + " ") for row in rows):
+            return
+        env = dict(os.environ)
+        env.pop("COURIER_OVERLAY_FIXTURE", None)
+        subprocess.Popen([str(app), str(STATE_FILE)], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, env=env)
+
+
 def monitor():
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with (STATE_DIR / "monitor.lock").open("a+") as lock:
@@ -157,17 +177,9 @@ def monitor():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return 0
-        app = app_path()
-        if not app.is_file():
-            return 0
-        env = dict(os.environ)
-        env.pop("COURIER_OVERLAY_FIXTURE", None)
-        process = subprocess.Popen([str(app), str(STATE_FILE)], stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   start_new_session=True, env=env)
         empty_since = None
         next_check = 0
-        while process.poll() is None:
+        while True:
             now = time.time()
             if now >= next_check:
                 with (STATE_DIR / "state.lock").open("a+") as state_lock:
@@ -195,7 +207,7 @@ def monitor():
             with (STATE_DIR / "state.lock").open("a+") as state_lock:
                 fcntl.flock(state_lock, fcntl.LOCK_EX)
                 old = read_pairs()
-                pairs = [pair for pair in old if pair["state"] != "archived_target" or now - pair["updated_at"] < 1.2]
+                pairs = [pair for pair in old if pair["state"] != "archived_target" or now - pair["updated_at"] < 2.8]
                 if pairs != old:
                     atomic_write({"pairs": pairs})
             if not read_pairs():
@@ -240,6 +252,7 @@ def main():
     except ValueError as error:
         parser.error(str(error))
     if pairs and app_path().is_file():
+        ensure_app()
         subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve()), "--monitor"],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
