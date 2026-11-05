@@ -194,6 +194,12 @@ class CourierTest(unittest.TestCase):
              patch.object(courier, "cua_target", side_effect=RuntimeError("must not access UI")):
             self.assertEqual(courier.cmd_ui_send(args), 2)
 
+    def test_ui_switch_requires_exact_unique_index_title(self):
+        args = SimpleNamespace(title='00159 test')
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', side_effect=RuntimeError('UI must not be accessed')):
+            self.assertEqual(courier.cmd_ui_switch(args), 2)
+
     def test_ax_textarea_decodes_escaped_newlines_for_draft_check(self):
         with patch.object(courier, "cua_tree", return_value='[3] AXTextArea "Message" = "第一行\\n第二行"'):
             self.assertEqual(courier.cua_textarea(42, 1), (3, "Message", "第一行\n第二行"))

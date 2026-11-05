@@ -651,10 +651,14 @@ def cmd_ui_tab(a):
 def cmd_ui_switch(a):
     """后台点左侧会话按钮（按标题），切完核对标签页。"""
     import re
+    matches = [d for d in load_index().values() if d.get("thread_name") == a.title]
+    if len(matches) != 1:
+        print("拒绝切页：必须给索引中唯一的完整标题")
+        return 2
     pid, wid = cua_target()
     before = cua_front()
     hits = re.findall(r'\[(\d+)\] AXButton "([^"]+)"', cua_tree(pid, wid, a.title))
-    hits = [(i, t) for i, t in hits if a.title in t]
+    hits = [(i, t) for i, t in hits if a.title == t]
     if not hits:
         print(f"左侧列表里没找到「{a.title}」")
         return 1
@@ -665,7 +669,7 @@ def cmd_ui_switch(a):
     time.sleep(1.5)
     tab = cua_tab(pid, wid)
     print(f"已切换：标签页「{tab}」  前台 {before} → {cua_front()}")
-    return 0 if tab and a.title in tab else 1
+    return 0 if tab == a.title and before == cua_front() else 1
 
 
 def cmd_ui_send(a):
