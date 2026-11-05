@@ -23,7 +23,7 @@
 ## 安全设计
 
 - 不覆盖草稿：输入框里只要不是占位文字，就停下来问你。
-- 发送前核对当前标签页；没有身份抬头的消息直接拒发。
+- cua-driver 备用通道要求完整会话 ID 和精确标签标题，点击发送前再核对标签与草稿；没有身份抬头的消息直接拒发。
 - 只在后台操作：不接管全屏、不碰剪贴板、不点链接。
 - 碰到资金、凭据、改规则、不可逆操作，或者迟迟没有进展，就停下来交还给你。
 
@@ -61,10 +61,13 @@ python3 -I $C find 00159                                  # 查会话 ID
 python3 -I $C compose --from-agent "Claude Code" --from-session 0007 \
   --to <ID> --file body.txt --out msg.txt                 # 加身份抬头
 # 用 Computer use 发送 msg.txt，或走备用通道：
-python3 -I $C ui-switch "00159" && python3 -I $C ui-send --file msg.txt --expect-tab "00159"
+python3 -I $C ui-switch "<完整标题>" && python3 -I $C ui-send --file msg.txt --session-id <ID> --expect-tab "<完整标题>"
 python3 -I $C verify <ID> --text "<片段>" --since <UTC 时间>
-python3 -I $C wait <ID> --since <UTC 时间>
+python3 -I $C wait <ID> --text "<唯一投递片段>"
+python3 -I $C watch <ID>             # 持续输出开工、完成、中止、等待确认
 ```
+
+`ui-send` 只用于索引中已有的会话；新建会话用 Computer use 或 `send --new`。`wait` 以匹配到的投递消息为锚，即使回合已结束也能返回；中止或抬头不符会返回非零。离线测试不代表真实 Codex 界面已经送达。
 
 ## 环境要求
 

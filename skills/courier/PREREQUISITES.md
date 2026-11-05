@@ -69,5 +69,5 @@ State and logs go to `$COURIER_STATE_DIR` (default `~/.local/state/courier`).
 
 1. `python3 -I scripts/courier.py find <any session title>` lists the session.
 2. Create a test session: compose a body with `compose --new` that asks only for the reply 「收到」.
-3. Send it through the front end, then `locate --text <snippet>` → `verify` → `wait`. Expect the reply 「收到」 and `回复抬头：✅`.
+3. Send it through Computer use or `send --new`, then `locate --text <snippet>` → `verify` → `wait <ID> --text <snippet>`. For cua-driver, first locate an existing test session and use its full ID and exact title. Expect the reply 「收到」 and `回复抬头：✅`.
 4. The frontmost app never changes during the run. Return Codex to the page the user was on.

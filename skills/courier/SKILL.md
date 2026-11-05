@@ -26,10 +26,11 @@ First time? Go through [`PREREQUISITES.md`](PREREQUISITES.md) and run its self-c
 | `locate --text <snippet> --since <time>` | Find a session by message text (use after creating a new session in the UI) | 0 / 1 none |
 | `status <ID>` | Is a turn running, plus the last few messages | 0 / 1 / 2 ambiguous |
 | `verify <ID> --text <snippet> --since <time>` | Delivery proof: the user message is in the log | 0 delivered / 1 not |
-| `wait <ID> --since <time>` | Wait for the turn to finish; print the final reply and check its reply header | 0 / 3 timeout |
-| `ui-tab` / `ui-switch <title>` / `ui-send --file <body> --expect-tab <title>` | Fallback front end via cua-driver (accessibility only, no screenshots) | `ui-send`: 0 sent / 2 refused / 1 no send button |
-| `watch <ID> [<ID> …] --since <time>` | Block until any listed session **finishes a turn** (state returns to idle), then exit. Run it in the background: its exit wakes you | 0 a session finished / 3 timeout |
-| `--app claude <find\|status\|verify\|wait\|watch\|locate\|compose>` | Same read-only back end for **Claude desktop sessions** (`~/.claude/projects`), so Codex can check Claude's state and replies | as above |
+| `wait <ID> --text <unique delivery snippet>` | Wait for the first turn end after that delivery; check the reply header | 0 verified / 1 failed / 2 ambiguous / 3 timeout |
+| `watch <ID> [<ID> …] --since <time>` | One-shot wake when any listed session ends a turn | 0 ended / 3 timeout |
+| `watch <ID> --stream` | Continuously print start, complete, abort, and approval-wait changes | 0 on bounded timeout |
+| `ui-tab` / `ui-switch <exact title>` / `ui-send --file <body> --session-id <ID> --expect-tab <exact title>` | Fallback front end for an existing session | `ui-send`: 0 clicked / 2 refused / 1 no send button |
+| `--app claude <find\|status\|verify\|wait\|watch\|locate\|compose>` | Read-only Claude desktop session back end (`~/.claude/projects`) | as above |
 | `send <ID> --file <body>` or `send --new --file <body>` | CLI fallback via `codex exec` | 0 submitted / 4 session held by the app |
 
 Session numbers can repeat. **Always act on the session ID.**
@@ -52,7 +53,7 @@ Every reply must start with the reverse:
 
 - Generate with `compose`. Never write the header by hand. `compose` also appends the reply requirement.
 - `send` and `ui-send` refuse a body without a header (exit 2).
-- `wait` prints `回复抬头：✅` or `❌`. On ❌, ask the receiver to restate the header before continuing.
+- `wait` returns nonzero on an aborted turn, missing reply, or wrong reply header. Stop and resolve the mismatch before continuing.
 - The receiver number comes from the leading digits of the session title, otherwise the first 8 characters of the ID. A new session is `Codex·新建`.
 
 ## Pick a channel
@@ -75,7 +76,7 @@ Why the CLI can't be primary: while the Codex app runs, it holds the write lock 
 | 4 Compose | `compose … --out body.txt` | Exit 0 |
 | 5 Send | Front end (below) or `send` | — |
 | 6 Verify | `verify <ID> --text <snippet> --since SINCE` | Exit 0. This is the only proof of delivery |
-| 7 Wait | `wait <ID> --since SINCE --timeout 900` | Final reply, reply header ✅ |
+| 7 Wait | `wait <ID> --text <unique delivery snippet> --timeout 900` | Final reply, reply header ✅ |
 
 ### Front end with Computer use
 
@@ -89,7 +90,7 @@ Why the CLI can't be primary: while the Codex app runs, it holds the write lock 
 
 ### Front end with cua-driver (fallback, no screenshots)
 
-`ui-switch "<title>"` → `ui-send --file body.txt --expect-tab "<title>"`. It writes with `set_value` and presses the send button by accessibility action. It refuses when the header is missing, the tab is wrong, or the input holds a draft. Never AXPress the input box itself: that once raised Codex to the front. Buttons don't.
+`ui-switch "<exact title>"` → `ui-send --file body.txt --session-id <ID> --expect-tab "<exact title>"`. This helper only addresses existing indexed sessions. It writes with `set_value`, checks the exact tab and draft again, then presses Send by accessibility action. If the target changes or the text differs, it leaves the draft in place and refuses to click. Never AXPress the input box itself: that once raised Codex to the front. Buttons don't.
 
 ## Two-way: Claude ⇄ Codex (send, then wake on state return)
 

@@ -10,17 +10,18 @@ App 里开着的会话要走界面通道（后台电脑操作工具），见上�
   codex_thread.py status <ID或标题片段>        当前回合是否在跑 + 最近几条消息
   codex_thread.py verify <ID或标题片段> --text <正文片段> [--since <ISO时间>]
                                                核对这条用户消息是否已写进记录（送达证据）
-  codex_thread.py wait <ID或标题片段> --since <ISO时间> [--timeout 600]
-                                               等 since 之后的回合结束，打印 Codex 的最终回复
+  codex_thread.py wait <ID或标题片段> --text <唯一投递片段> [--timeout 600]
+                                               等对应投递后的首个回合结束，核对最终回复
+  codex_thread.py watch <ID或标题片段>            持续输出开工 / 完成 / 中止 / 等待确认的变化
 
   codex_thread.py compose --from-agent <App或Agent> --from-session <编号> (--to <ID或标题> | --new) --file <正文> [--out <文件>]
                                                加投递抬头「【投递】Claude Code·0007 → Codex·00159」；send 和前端发送都必须用带抬头的正文
-  codex_thread.py ui-tab | ui-switch <标题> | ui-send --file <带抬头正文> [--expect-tab <标题>]
+  codex_thread.py ui-tab | ui-switch <完整标题> | ui-send --file <带抬头正文> --session-id <ID> --expect-tab <完整标题>
                                                前端备用通道（cua-driver，纯无障碍接口，不截图、不抢焦点）
   codex_thread.py send [<ID或标题>] --file <正文文件> [--new]
                                                命令行通道：--new 新建会话；给 ID 则续接没在 App 里打开的会话
 
-退出码：0 成功；1 没找到 / 未送达；2 参数错误或会话不唯一；3 等待超时；4 会话被 App 占用（active writer）。
+退出码：0 成功；1 没找到 / 未送达 / 回合或身份核验失败；2 参数错误或会话不唯一；3 等待超时；4 会话被 App 占用（active writer）。
 """
 import argparse
 import glob
@@ -221,13 +222,13 @@ def log_id(path):
     return base if APP == "claude" else base.split("-", 6)[-1]
 
 
-def cmd_watch(a):
+def cmd_watch_once(a):
     """后台盯多个会话：任一会话在 since 之后结束一个回合就退出（状态恢复 = 回合结束）。
 
     设计给发送方放到后台跑：退出即唤醒发送方，再用 wait/status 读回复。
     """
     targets = [one(k) for k in a.keys]
-    deadline = time.time() + a.timeout
+    deadline = time.time() + (a.timeout if a.timeout is not None else 3600)
     while True:
         for d, path in targets:
             msgs, running, last_done = scan(path, a.since)
@@ -299,13 +300,14 @@ def cmd_wait(a):
     d, path = one(a.key)
     deadline = time.time() + a.timeout
     while True:
-        anchors, replies, last_done, running = delivery_turn(path, a.text)
+        anchors, replies, last_done, running = (delivery_turn(path, a.text) if a.text
+                                               else legacy_turn(path, a.since))
         if anchors > 1:
             print("投递锚点不唯一；请提供更独特的 --text", file=sys.stderr)
             return 2
         if anchors == 1 and last_done:
             print(f"回合结束：{last_done[1]} @ {last_done[0]}")
-            if last_done[1] != "task_complete":
+            if last_done[1] not in ("task_complete", "end_turn"):
                 print("回合中止，未取得完成回执", file=sys.stderr)
                 return 1
             if not replies:
@@ -318,8 +320,8 @@ def cmd_wait(a):
                 print("投递抬头无效，不能核对回复身份", file=sys.stderr)
                 return 1
             f_tok, t_tok = parse_header(sent[0][2])
-            expected_target = token("Codex", session_number(d.get("thread_name"), d["id"]))
-            if t_tok != expected_target and not (t_tok == token("Codex", "新建") and d.get("thread_name") == "(索引里没有)"):
+            expected_target = token(APP_TOKEN[APP], session_number(d.get("thread_name"), d["id"]))
+            if t_tok != expected_target and not (t_tok == token(APP_TOKEN[APP], "新建") and d.get("thread_name") == "(索引里没有)"):
                 print(f"投递收件令牌与目标会话不符：{t_tok} != {expected_target}", file=sys.stderr)
                 return 1
             want = reply_line(f_tok, t_tok)
@@ -340,6 +342,27 @@ def delivery_turn(path, text):
     """Find the first turn end after the unique matching delivery, regardless of wall time."""
     anchors, replies, done, running = 0, [], None, False
     for d in events(path):
+        if APP == "claude":
+            if d.get("isSidechain") or d.get("isMeta"):
+                continue
+            m = d.get("message") or {}
+            ts = d.get("timestamp", "")
+            if d.get("type") == "user":
+                c = m.get("content")
+                if isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
+                    continue
+                value = claude_text(c, "user")
+                if value.strip() and not value.lstrip().startswith("<") and text in value:
+                    anchors += 1
+                    if anchors == 1:
+                        replies, done, running = [(ts, "user", value)], None, True
+            elif anchors == 1 and done is None and d.get("type") == "assistant":
+                value = claude_text(m.get("content"), "assistant")
+                if value.strip():
+                    replies.append((ts, "assistant", value))
+                if m.get("stop_reason") == "end_turn":
+                    done, running = (ts, "end_turn"), False
+            continue
         p = d.get("payload") or {}
         ts = d.get("timestamp", "")
         if d.get("type") == "response_item" and p.get("type") == "message":
@@ -359,6 +382,18 @@ def delivery_turn(path, text):
     return anchors, replies, done, running
 
 
+def legacy_turn(path, since):
+    """Compatibility for callers that used a wall-clock start before delivery anchors existed."""
+    msgs, running, done = scan(path, since)
+    if not since or not done or done[0] < since:
+        return 0, [], None, running
+    users = [i for i, m in enumerate(msgs) if m[1] == "user" and parse_header(m[2])]
+    if not users:
+        return 0, [], None, running
+    replies = msgs[users[-1]:]
+    return 1, replies, done, running
+
+
 def status_event(row):
     """Map rollout control events to a small, private-text-free status stream."""
     payload = row.get("payload") or {}
@@ -372,8 +407,8 @@ def status_event(row):
     return None
 
 
-def cmd_watch(a):
-    _, path = one(a.key)
+def cmd_watch_stream(a):
+    _, path = one(a.keys[0])
     deadline = time.monotonic() + a.timeout if a.timeout is not None else None
     seen, current = 0, None
     while True:
@@ -381,7 +416,7 @@ def cmd_watch(a):
         if len(rows) < seen:
             seen, current = 0, None
         for row in rows[seen:]:
-            status = status_event(row)
+            status = claude_status_event(row) if APP == "claude" else status_event(row)
             if status and status != current:
                 print(f"{row.get('timestamp', '')} {status}", flush=True)
                 current = status
@@ -389,6 +424,29 @@ def cmd_watch(a):
         if deadline is not None and time.monotonic() >= deadline:
             return 0
         time.sleep(max(0.1, a.interval))
+
+
+def claude_status_event(row):
+    if row.get("isSidechain") or row.get("isMeta"):
+        return None
+    message = row.get("message") or {}
+    if row.get("type") == "user":
+        content = message.get("content")
+        if isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            return None
+        return "开工" if claude_text(content, "user").strip() else None
+    if row.get("type") == "assistant":
+        return "完成" if message.get("stop_reason") == "end_turn" else None
+    return None
+
+
+def cmd_watch(a):
+    if a.stream or a.since is None:
+        if len(a.keys) != 1:
+            print("状态流只接受一个会话", file=sys.stderr)
+            return 2
+        return cmd_watch_stream(a)
+    return cmd_watch_once(a)
 
 
 # 发送方名称：默认任何不含特殊符号的名字都可以；设置 COURIER_AGENTS（逗号分隔）就只认名单里的
@@ -424,7 +482,7 @@ def parse_header(text):
     """从投递正文取 (发件令牌, 收件令牌)；取不到返回 None。"""
     import re
     first = text.splitlines()[0] if text else ""
-    match = re.fullmatch(r"【投递】([A-Za-z0-9][A-Za-z0-9 ._-]{0,39}·\d{3,}) → (Codex·(?:[A-Za-z0-9]{3,}|新建))", first)
+    match = re.fullmatch(r"【投递】([A-Za-z0-9][A-Za-z0-9 ._-]{0,39}·\d{3,}) → ([A-Za-z0-9][A-Za-z0-9 ._-]{0,39}·(?:[A-Za-z0-9]{3,}|新建))", first)
     return (match.group(1), match.group(2)) if match else None
 
 
@@ -515,7 +573,7 @@ def cmd_send(a):
                 sid = line.split(":", 1)[1].strip()
                 print(f"已提交：会话 {sid}  SINCE={since}")
                 print(f"日志：{log}")
-                print(f"下一步：python3 -I {os.path.realpath(__file__)} wait {sid} --since {since}")
+                print(f"下一步：先 verify {sid} --text <唯一投递片段>，再 wait {sid} --text <唯一投递片段>")
                 return 0
     print(f"30 秒内没拿到 session id，看日志：{log}")
     return 1
@@ -626,7 +684,8 @@ def cmd_ui_switch(a):
 def cmd_ui_send(a):
     """写输入框（set_value 整框）+ 点「发送」。输入框非空（有草稿）一律拒绝，不覆盖。"""
     import re
-    body = clean_ui_body(open(a.file, encoding="utf-8").read().rstrip())
+    with open(a.file, encoding="utf-8") as source:
+        body = clean_ui_body(source.read().rstrip())
     if not has_header(body):
         print("拒发：正文第一行没有投递抬头。先用 compose 生成。", file=sys.stderr)
         return 2
@@ -691,8 +750,9 @@ def main():
     ap.add_argument("--app", choices=["codex", "claude"], default="codex",
                     help="读哪个 App 的会话：codex（默认）或 claude（只读后端）")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    wa = sub.add_parser("watch"); wa.add_argument("keys", nargs="+"); wa.add_argument("--since", required=True)
-    wa.add_argument("--timeout", type=int, default=3600); wa.add_argument("--interval", type=float, default=5)
+    wa = sub.add_parser("watch"); wa.add_argument("keys", nargs="+"); wa.add_argument("--since")
+    wa.add_argument("--stream", action="store_true")
+    wa.add_argument("--timeout", type=float); wa.add_argument("--interval", type=float, default=2)
     wa.set_defaults(fn=cmd_watch)
     f = sub.add_parser("find"); f.add_argument("key"); f.set_defaults(fn=cmd_find)
     s = sub.add_parser("status"); s.add_argument("key")
@@ -700,11 +760,9 @@ def main():
     s.set_defaults(fn=cmd_status)
     v = sub.add_parser("verify"); v.add_argument("key"); v.add_argument("--text", required=True)
     v.add_argument("--since"); v.set_defaults(fn=cmd_verify)
-    w = sub.add_parser("wait"); w.add_argument("key"); w.add_argument("--text", required=True); w.add_argument("--since")
+    w = sub.add_parser("wait"); w.add_argument("key"); w.add_argument("--text"); w.add_argument("--since")
     w.add_argument("--timeout", type=int, default=600); w.add_argument("--interval", type=float, default=3)
     w.set_defaults(fn=cmd_wait)
-    wa = sub.add_parser("watch"); wa.add_argument("key"); wa.add_argument("--interval", type=float, default=2)
-    wa.add_argument("--timeout", type=float); wa.set_defaults(fn=cmd_watch)
     c = sub.add_parser("compose"); c.add_argument("--from-agent", required=True)
     c.add_argument("--from-session", required=True); c.add_argument("--to"); c.add_argument("--new", action="store_true")
     c.add_argument("--file", required=True); c.add_argument("--out"); c.set_defaults(fn=cmd_compose)
@@ -719,6 +777,8 @@ def main():
     n.add_argument("--sandbox", default="workspace-write", choices=["read-only", "workspace-write"])
     n.set_defaults(fn=cmd_send)
     a = ap.parse_args()
+    if a.cmd == "wait" and not (a.text or a.since):
+        ap.error("wait 需要 --text <唯一投递片段>，旧调用可用 --since <时间>")
     global APP
     APP = a.app
     if APP == "claude" and a.cmd in ("send", "ui-send", "ui-switch", "ui-tab"):
