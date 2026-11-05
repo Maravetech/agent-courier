@@ -240,6 +240,15 @@ class CourierTest(unittest.TestCase):
              patch.object(courier, 'cua_target', side_effect=RuntimeError('UI must not be accessed')):
             self.assertEqual(courier.cmd_ui_switch(args), 2)
 
+    def test_cua_target_can_select_exact_window_when_two_are_open(self):
+        apps = json.dumps({'apps': [{'pid': 42, 'bundle_id': courier.CODEX_BUNDLE, 'running': True}]})
+        wins = json.dumps({'windows': [
+            {'window_id': 111, 'is_on_screen': True, 'bounds': {'height': 500}},
+            {'window_id': 222, 'is_on_screen': True, 'bounds': {'height': 500}},
+        ]})
+        with patch.object(courier, 'cua', side_effect=[apps, wins]):
+            self.assertEqual(courier.cua_target(222), (42, 222))
+
     def test_ax_textarea_decodes_escaped_newlines_for_draft_check(self):
         with patch.object(courier, "cua_tree", return_value='[3] AXTextArea "Message" = "第一行\\n第二行"'):
             self.assertEqual(courier.cua_textarea(42, 1), (3, "Message", "第一行\n第二行"))

@@ -69,6 +69,8 @@ python3 -I $C watch <ID>             # stream start / complete / abort / waiting
 
 `ui-send` is for existing indexed sessions. Use Computer use or `send --new` to create a session. `wait` anchors to the matching delivery message, even if you start waiting after its turn has ended. A failed or mismatched reply exits nonzero. The offline tests do not prove real Codex UI delivery.
 
+When Codex has multiple on-screen windows, pass `--window-id <ID>` to `ui-tab`, `ui-switch`, and `ui-send` (obtain the ID from `cua-driver call list_windows '{}'`). The helper restricts AX lookup and send checks to that window; if the same exact title still appears twice inside that window, it refuses the ambiguous click.
+
 ## Requirements
 
 macOS, the Codex desktop app, Python 3.8+ (standard library only). Optional: Claude desktop app with Computer use, cua-driver, Codex CLI. Tested versions are listed in [PREREQUISITES.md](skills/courier/PREREQUISITES.md).

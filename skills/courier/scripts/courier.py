@@ -622,8 +622,8 @@ def cua(tool, args):
     return r.stdout
 
 
-def cua_target():
-    """返回 (pid, window_id)：Codex 在屏上的主窗口。"""
+def cua_target(window_id=None):
+    """返回 (pid, window_id)：多窗口时必须明确指定目标窗口。"""
     apps = json.loads(cua("list_apps", {}))["apps"]
     pid = next((a["pid"] for a in apps if a.get("bundle_id") == CODEX_BUNDLE and a.get("running")), None)
     if not pid:
@@ -632,8 +632,13 @@ def cua_target():
     wins = [w for w in wins if w.get("is_on_screen") and w["bounds"]["height"] > 200]
     if not wins:
         raise RuntimeError("Codex 没有在屏上的主窗口（最小化或在别的桌面空间）")
+    if window_id is not None:
+        chosen = [w for w in wins if w["window_id"] == window_id]
+        if len(chosen) != 1:
+            raise RuntimeError("指定的 Codex 窗口不在屏上")
+        return pid, chosen[0]["window_id"]
     if len(wins) != 1:
-        raise RuntimeError("Codex 同时有多个屏上窗口；无法安全确定目标窗口")
+        raise RuntimeError("Codex 同时有多个屏上窗口；请用 --window-id 指定目标")
     return pid, wins[0]["window_id"]
 
 
@@ -667,7 +672,7 @@ def cua_textarea(pid, wid):
 
 
 def cmd_ui_tab(a):
-    pid, wid = cua_target()
+    pid, wid = cua_target(getattr(a, "window_id", None))
     print(f"当前标签页：{cua_tab(pid, wid)}  前台：{cua_front()}")
     return 0
 
@@ -679,7 +684,7 @@ def cmd_ui_switch(a):
     if len(matches) != 1:
         print("拒绝切页：必须给索引中唯一的完整标题")
         return 2
-    pid, wid = cua_target()
+    pid, wid = cua_target(getattr(a, "window_id", None))
     before = cua_front()
     hits = re.findall(r'\[(\d+)\] AXButton "([^"]+)"', cua_tree(pid, wid, a.title))
     hits = [(i, t) for i, t in hits if a.title == t]
@@ -718,7 +723,7 @@ def cmd_ui_send(a):
     if not parsed or parsed[1] != token("Codex", session_number(d.get("thread_name"), d["id"])):
         print("拒发：正文收件令牌与目标会话不符", file=sys.stderr)
         return 2
-    pid, wid = cua_target()
+    pid, wid = cua_target(getattr(a, "window_id", None))
     tab = cua_tab(pid, wid)
     if tab != a.expect_tab:
         print(f"拒发：当前标签页是「{tab}」，不是「{a.expect_tab}」。先 ui-switch。")
@@ -735,7 +740,7 @@ def cmd_ui_send(a):
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     cua("set_value", {"pid": pid, "window_id": wid, "element_index": idx, "value": body})
     time.sleep(0.4)
-    if cua_target() != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
+    if cua_target(getattr(a, "window_id", None)) != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
         print("拒发：写入后目标窗口或标签页已变化；草稿保留")
         return 2
     new_idx, _, new_value = cua_textarea(pid, wid)
@@ -751,7 +756,7 @@ def cmd_ui_send(a):
     if btn is None:
         print("写入了但找不到「发送」按钮，没有发送。请人工检查输入框。")
         return 1
-    if cua_target() != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
+    if cua_target(getattr(a, "window_id", None)) != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
         print("拒发：点击前目标窗口或标签页已变化；草稿保留")
         return 2
     cua("click", {"pid": pid, "window_id": wid, "element_index": btn})
@@ -783,9 +788,9 @@ def main():
     c.add_argument("--file", required=True); c.add_argument("--out"); c.set_defaults(fn=cmd_compose)
     lo = sub.add_parser("locate"); lo.add_argument("--text", required=True); lo.add_argument("--since")
     lo.add_argument("--hours", type=float, default=24); lo.set_defaults(fn=cmd_locate)
-    sub.add_parser("ui-tab").set_defaults(fn=cmd_ui_tab)
-    us = sub.add_parser("ui-switch"); us.add_argument("title"); us.set_defaults(fn=cmd_ui_switch)
-    ud = sub.add_parser("ui-send"); ud.add_argument("--file", required=True); ud.add_argument("--session-id", required=True); ud.add_argument("--expect-tab", required=True)
+    ut = sub.add_parser("ui-tab"); ut.add_argument("--window-id", type=int); ut.set_defaults(fn=cmd_ui_tab)
+    us = sub.add_parser("ui-switch"); us.add_argument("title"); us.add_argument("--window-id", type=int); us.set_defaults(fn=cmd_ui_switch)
+    ud = sub.add_parser("ui-send"); ud.add_argument("--file", required=True); ud.add_argument("--session-id", required=True); ud.add_argument("--expect-tab", required=True); ud.add_argument("--window-id", type=int)
     ud.set_defaults(fn=cmd_ui_send)
     n = sub.add_parser("send"); n.add_argument("key", nargs="?"); n.add_argument("--file", required=True)
     n.add_argument("--new", action="store_true"); n.add_argument("--cwd")
