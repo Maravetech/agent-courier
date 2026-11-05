@@ -653,9 +653,9 @@ def cua_tab(pid, wid):
 
 
 def cua_textarea(pid, wid):
-    """返回 (index, 占位文字, 当前值)。值等于占位文字才算空。"""
+    """返回 (index, 占位文字, 当前值)。读取未过滤树，保留多行 AXValue。"""
     import re
-    m = re.search(r'\[(\d+)\] AXTextArea "([^"]*)"(?: = "((?:[^"\\]|\\.)*))?', cua_tree(pid, wid, "AXTextArea"))
+    m = re.search(r'\[(\d+)\] AXTextArea "([^"]*)"(?: = "((?:[^"\\]|\\.)*))?', cua_tree(pid, wid, ""))
     if not m:
         raise RuntimeError("找不到输入框")
     value = m.group(3) or ""

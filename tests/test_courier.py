@@ -244,6 +244,12 @@ class CourierTest(unittest.TestCase):
         with patch.object(courier, "cua_tree", return_value='[3] AXTextArea "Message" = "第一行\\n第二行"'):
             self.assertEqual(courier.cua_textarea(42, 1), (3, "Message", "第一行\n第二行"))
 
+    def test_ax_textarea_reads_full_multiline_value_without_query_filter(self):
+        def tree(_pid, _wid, query):
+            return '[3] AXTextArea "Message" = "第一行\n第二行"' if query == '' else '[3] AXTextArea "Message" = "第一行"'
+        with patch.object(courier, 'cua_tree', side_effect=tree):
+            self.assertEqual(courier.cua_textarea(42, 1), (3, 'Message', '第一行\n第二行'))
+
     def test_ci_permissions_and_action_pins(self):
         workflow = Path(os.path.join(os.path.dirname(__file__), '..', '.github', 'workflows', 'ci.yml')).read_text(encoding='utf-8')
         self.assertRegex(workflow, r'permissions:\s*\n\s+contents: read')
