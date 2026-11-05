@@ -76,7 +76,7 @@ python3 -I $C watch <ID>             # stream start / complete / abort / waiting
 
 **Cua-driver multi-window limitation:** Pass `--window-id <ID>` to `ui-tab`, `ui-switch`, and `ui-send` when Codex has multiple windows (obtain the ID from `cua-driver call list_windows '{}'`). The helper splits the AX snapshot at each top-level `AXWindow` and requires every subtree to map uniquely to a WindowServer window. On the tested Codex/CuaDriver setup, even one on-screen window yields two identical `AXWindow` roots with no exposed position, size, main, focused, or minimized attributes. The cua-driver send channel is **unavailable in that state** and refuses before writing; `--window-id` cannot override the refusal. Do not choose a root by order.
 
-`ui-tab`, `ui-switch`, and `ui-send` share a cross-process Codex UI lock in `COURIER_STATE_DIR` because even a read-only AX snapshot replaces the driver's element-index map. The lock records the holder PID and command, releases on process exit, and times out after 10 seconds by default (`--lock-timeout <seconds>`). The send path also checks that the header receiver number matches the current tab number before writing.
+`ui-tab`, `ui-switch`, and `ui-send` share a cross-process Codex UI lock in `COURIER_STATE_DIR` because even a read-only AX snapshot replaces the driver's element-index map. The lock records the holder PID and command, releases on process exit, and times out after 10 seconds by default (`--lock-timeout <seconds>`). Only courier processes using this version and the same state directory cooperate; direct cua-driver calls and older installed copies do not. The send path also checks that the header receiver number matches the current tab number before writing.
 
 ## Requirements
 

@@ -77,7 +77,7 @@ python3 -I $C watch <ID>             # 持续输出开工、完成、中止、�
 
 **cua-driver 多窗口限制：**Codex 同时开多个窗口时，可用 `cua-driver call list_windows '{}'` 取得目标窗口 ID，给 `ui-tab`、`ui-switch`、`ui-send` 传 `--window-id <ID>`。工具按顶层 `AXWindow` 切分，要求每棵子树都唯一对应一个系统窗口。当前实测即使只有一个屏上窗口，快照里仍有两个完全同名的 `AXWindow`，且没有可读取的位置、尺寸、主窗口、聚焦或最小化属性；此状态下 cua-driver 备用投递通道**多窗口不可用**，会在写入前拒绝。`--window-id` 不能强行放行，也不能按出现顺序猜。
 
-`ui-tab`、`ui-switch`、`ui-send` 共用 `$COURIER_STATE_DIR` 下的跨进程 Codex 界面锁，因为只读 AX 快照也会替换驱动的元素索引表。锁记录持有者 PID 与命令，进程退出即释放；默认 10 秒超时，可用 `--lock-timeout <秒>` 调整。发送前还会核对抬头收件编号与当前标签页编号。
+`ui-tab`、`ui-switch`、`ui-send` 共用 `$COURIER_STATE_DIR` 下的跨进程 Codex 界面锁，因为只读 AX 快照也会替换驱动的元素索引表。锁记录持有者 PID 与命令，进程退出即释放；默认 10 秒超时，可用 `--lock-timeout <秒>` 调整。只有使用同一状态目录的本版 courier 进程会遵守该锁；直接调用 cua-driver 或仍用旧插件的 Agent 不受约束。发送前还会核对抬头收件编号与当前标签页编号。
 
 ## 环境要求
 
