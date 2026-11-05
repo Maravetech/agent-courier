@@ -280,7 +280,7 @@ def cmd_status(a):
     print(f"会话：{d.get('thread_name')}  {d['id']}")
     print(f"记录：{path}")
     print(f"回合：{'正在运行' if running else '空闲'}；最后结束：{last_done}")
-    for ts, role, t in msgs[-a.n:]:
+    for ts, role, t in (msgs[-a.n:] if a.n > 0 else []):
         print(f"--- {ts} {role}\n{t[:a.chars]}")
     return 0
 

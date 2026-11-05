@@ -83,6 +83,12 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("空闲", out)
 
+    def test_status_zero_messages_hides_message_bodies(self):
+        code, out = self.run_cli('status', TID, '-n', '0')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('marker-42', out)
+        self.assertNotIn('--- 2026-', out)
+
     def test_verify(self):
         self.assertEqual(self.run_cli("verify", TID, "--text", "marker-42")[0], 0)
         self.assertEqual(self.run_cli("verify", TID, "--text", "marker-42", "--since", "2026-01-03T00:00:00Z")[0], 1)
