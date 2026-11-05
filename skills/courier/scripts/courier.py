@@ -305,17 +305,29 @@ def cmd_wait(a):
             return 2
         if anchors == 1 and last_done:
             print(f"回合结束：{last_done[1]} @ {last_done[0]}")
+            if last_done[1] != "task_complete":
+                print("回合中止，未取得完成回执", file=sys.stderr)
+                return 1
             if not replies:
                 print("（这一回合没有助手回复）")
-                return 0
+                return 1
             ts, _, t = replies[-1]
             # 回复抬头核对：按本轮最后一条投递的抬头推出应有的回复抬头
             sent = [m for m in replies if m[1] == "user" and parse_header(m[2])]
-            if sent:
-                f_tok, t_tok = parse_header(sent[-1][2])
-                want = reply_line(f_tok, t_tok)
-                got = t.lstrip().splitlines()[0].strip() if t.strip() else ""
-                print(f"回复抬头：{'✅ ' + want if got == want else '❌ 缺或不符（应为「' + want + '」，实际「' + got[:60] + '」）'}")
+            if not sent:
+                print("投递抬头无效，不能核对回复身份", file=sys.stderr)
+                return 1
+            f_tok, t_tok = parse_header(sent[0][2])
+            expected_target = token("Codex", session_number(d.get("thread_name"), d["id"]))
+            if t_tok != expected_target and not (t_tok == token("Codex", "新建") and d.get("thread_name") == "(索引里没有)"):
+                print(f"投递收件令牌与目标会话不符：{t_tok} != {expected_target}", file=sys.stderr)
+                return 1
+            want = reply_line(f_tok, t_tok)
+            got = t.splitlines()[0] if t else ""
+            if got != want:
+                print(f"回复抬头：❌ 缺或不符（应为「{want}」，实际「{got[:60]}」）")
+                return 1
+            print(f"回复抬头：✅ {want}")
             print(f"--- 最终回复 {ts}\n{t}")
             return 0
         if time.time() > deadline:
@@ -378,16 +390,14 @@ def reply_line(from_token, to_token):
 
 def parse_header(text):
     """从投递正文取 (发件令牌, 收件令牌)；取不到返回 None。"""
-    first = text.lstrip().splitlines()[0] if text.strip() else ""
-    if not first.startswith(HEADER_PREFIX) or "→" not in first:
-        return None
-    a, b = first[len(HEADER_PREFIX):].split("→", 1)
-    return a.strip(), b.strip()
+    import re
+    first = text.splitlines()[0] if text else ""
+    match = re.fullmatch(r"【投递】([A-Za-z0-9][A-Za-z0-9 ._-]{0,39}·\d{3,}) → (Codex·(?:[A-Za-z0-9]{3,}|新建))", first)
+    return (match.group(1), match.group(2)) if match else None
 
 
 def has_header(text):
-    first = text.lstrip().splitlines()[0] if text.strip() else ""
-    return first.startswith(HEADER_PREFIX) and "→" in first and "·" in first
+    return parse_header(text) is not None
 
 
 def session_number(thread_name, thread_id):

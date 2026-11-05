@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import importlib.util
+import glob
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -98,6 +99,28 @@ class CourierTest(unittest.TestCase):
         code, out = self.run_cli("wait", TID, "--text", "marker-42", "--since", "2026-01-03T00:00:00Z", "--timeout", "1")
         self.assertEqual(code, 0, out)
         self.assertIn("收到", out)
+
+    def test_wait_fails_on_abort_or_wrong_reply_header(self):
+        path = glob.glob(os.path.join(self.tmp.name, "sessions", "*", "*", "*", "rollout-*.jsonl"))[0]
+        original = open(path, encoding="utf-8").read()
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(original.replace('"type": "task_complete"', '"type": "turn_aborted"'))
+        code, out = self.run_cli("wait", TID, "--text", "marker-42", "--timeout", "1")
+        self.assertNotEqual(code, 0, out)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(original.replace("【回复】Codex·00159 → Claude Code·0007", "【回复】Codex·00160 → Claude Code·0007"))
+        code, out = self.run_cli("wait", TID, "--text", "marker-42", "--timeout", "1")
+        self.assertNotEqual(code, 0, out)
+        self.assertIsNone(courier.parse_header("【投递】伪造 → Codex·00159\n正文"))
+
+    def test_wait_rejects_delivery_header_for_another_session(self):
+        path = glob.glob(os.path.join(self.tmp.name, "sessions", "*", "*", "*", "rollout-*.jsonl"))[0]
+        with open(path, encoding="utf-8") as f:
+            original = f.read()
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(original.replace("Codex·00159", "Codex·00160"))
+        code, out = self.run_cli("wait", TID, "--text", "marker-42", "--timeout", "1")
+        self.assertNotEqual(code, 0, out)
 
     def test_locate_includes_archived(self):
         code, out = self.run_cli("locate", "--text", "marker-77", "--hours", "1000000")
