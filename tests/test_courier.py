@@ -123,6 +123,16 @@ class CourierTest(unittest.TestCase):
         code, out = self.run_cli("wait", TID, "--text", "marker-42", "--timeout", "1")
         self.assertNotEqual(code, 0, out)
 
+    def test_wait_rejects_interleaved_user_message(self):
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        original = Path(path).read_text(encoding='utf-8')
+        extra = msg('2026-01-02T00:00:01.750Z', 'user', 'another user request') + '\n'
+        marker = msg('2026-01-02T00:00:02.000Z', 'assistant', '【回复】Codex·00159 → Claude Code·0007\n收到')
+        Path(path).write_text(original.replace(marker, extra + marker), encoding='utf-8')
+        code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '1')
+        self.assertEqual(code, 1, out)
+        self.assertIn('其他用户消息', out)
+
     def test_watch_emits_only_status_transitions(self):
         path = glob.glob(os.path.join(self.tmp.name, "sessions", "*", "*", "*", "rollout-*.jsonl"))[0]
         with open(path, "a", encoding="utf-8") as f:

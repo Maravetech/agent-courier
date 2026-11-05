@@ -307,13 +307,17 @@ def cmd_wait(a):
             return 2
         if anchors == 1 and last_done:
             print(f"回合结束：{last_done[1]} @ {last_done[0]}")
+            if last_done[1] == "interleaved":
+                print("投递后插入了其他用户消息，不能把回复归给这次投递", file=sys.stderr)
+                return 1
             if last_done[1] not in ("task_complete", "end_turn"):
                 print("回合中止，未取得完成回执", file=sys.stderr)
                 return 1
-            if not replies:
+            assistants = [m for m in replies if m[1] == "assistant" and m[2].strip()]
+            if not assistants:
                 print("（这一回合没有助手回复）")
                 return 1
-            ts, _, t = replies[-1]
+            ts, _, t = assistants[-1]
             # 回复抬头核对：按本轮最后一条投递的抬头推出应有的回复抬头
             sent = [m for m in replies if m[1] == "user" and parse_header(m[2])]
             if not sent:
@@ -352,10 +356,13 @@ def delivery_turn(path, text):
                 if isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
                     continue
                 value = claude_text(c, "user")
-                if value.strip() and not value.lstrip().startswith("<") and text in value:
-                    anchors += 1
-                    if anchors == 1:
-                        replies, done, running = [(ts, "user", value)], None, True
+                if value.strip() and not value.lstrip().startswith("<"):
+                    if text in value:
+                        anchors += 1
+                        if anchors == 1:
+                            replies, done, running = [(ts, "user", value)], None, True
+                    if anchors == 1 and done is None and replies and value != replies[0][2]:
+                        done, running = (ts, "interleaved"), False
             elif anchors == 1 and done is None and d.get("type") == "assistant":
                 value = claude_text(m.get("content"), "assistant")
                 if value.strip():
@@ -367,12 +374,15 @@ def delivery_turn(path, text):
         ts = d.get("timestamp", "")
         if d.get("type") == "response_item" and p.get("type") == "message":
             role, value = p.get("role"), text_of(p)
-            if role == "user" and is_real_user(value) and text in value:
-                anchors += 1
-                if anchors == 1:
-                    replies = [(ts, "user", value)]
-                    done = None
-                    running = True
+            if role == "user" and is_real_user(value):
+                if text in value:
+                    anchors += 1
+                    if anchors == 1:
+                        replies = [(ts, "user", value)]
+                        done = None
+                        running = True
+                if anchors == 1 and done is None and replies and value != replies[0][2]:
+                    done, running = (ts, "interleaved"), False
             elif anchors == 1 and done is None and role == "assistant":
                 replies.append((ts, role, value))
         elif anchors == 1 and done is None and d.get("type") == "event_msg":
@@ -391,6 +401,9 @@ def legacy_turn(path, since):
     if not users:
         return 0, [], None, running
     replies = msgs[users[-1]:]
+    intervening = next((m for m in replies[1:] if m[1] == "user"), None)
+    if intervening:
+        return 1, replies, (intervening[0], "interleaved"), False
     return 1, replies, done, running
 
 
