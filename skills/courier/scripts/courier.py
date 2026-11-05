@@ -359,6 +359,38 @@ def delivery_turn(path, text):
     return anchors, replies, done, running
 
 
+def status_event(row):
+    """Map rollout control events to a small, private-text-free status stream."""
+    payload = row.get("payload") or {}
+    kind = payload.get("type")
+    if row.get("type") == "event_msg":
+        return {"task_started": "开工", "task_complete": "完成", "turn_aborted": "中止",
+                "user_input_requested": "等待确认", "approval_request": "等待确认"}.get(kind)
+    if row.get("type") == "response_item" and kind == "function_call":
+        if payload.get("name") in ("request_user_input", "request_user_input_async", "request_approval"):
+            return "等待确认"
+    return None
+
+
+def cmd_watch(a):
+    _, path = one(a.key)
+    deadline = time.monotonic() + a.timeout if a.timeout is not None else None
+    seen, current = 0, None
+    while True:
+        rows = list(events(path))
+        if len(rows) < seen:
+            seen, current = 0, None
+        for row in rows[seen:]:
+            status = status_event(row)
+            if status and status != current:
+                print(f"{row.get('timestamp', '')} {status}", flush=True)
+                current = status
+        seen = len(rows)
+        if deadline is not None and time.monotonic() >= deadline:
+            return 0
+        time.sleep(max(0.1, a.interval))
+
+
 # 发送方名称：默认任何不含特殊符号的名字都可以；设置 COURIER_AGENTS（逗号分隔）就只认名单里的
 AGENTS = tuple(x.strip() for x in os.environ.get("COURIER_AGENTS", "").split(",") if x.strip())
 
@@ -671,6 +703,8 @@ def main():
     w = sub.add_parser("wait"); w.add_argument("key"); w.add_argument("--text", required=True); w.add_argument("--since")
     w.add_argument("--timeout", type=int, default=600); w.add_argument("--interval", type=float, default=3)
     w.set_defaults(fn=cmd_wait)
+    wa = sub.add_parser("watch"); wa.add_argument("key"); wa.add_argument("--interval", type=float, default=2)
+    wa.add_argument("--timeout", type=float); wa.set_defaults(fn=cmd_watch)
     c = sub.add_parser("compose"); c.add_argument("--from-agent", required=True)
     c.add_argument("--from-session", required=True); c.add_argument("--to"); c.add_argument("--new", action="store_true")
     c.add_argument("--file", required=True); c.add_argument("--out"); c.set_defaults(fn=cmd_compose)

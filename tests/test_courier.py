@@ -122,6 +122,16 @@ class CourierTest(unittest.TestCase):
         code, out = self.run_cli("wait", TID, "--text", "marker-42", "--timeout", "1")
         self.assertNotEqual(code, 0, out)
 
+    def test_watch_emits_only_status_transitions(self):
+        path = glob.glob(os.path.join(self.tmp.name, "sessions", "*", "*", "*", "rollout-*.jsonl"))[0]
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line("2026-01-02T00:00:04.000Z", "event_msg", {"type": "task_started"}) + "\n")
+            f.write(line("2026-01-02T00:00:05.000Z", "response_item", {"type": "function_call", "name": "request_user_input"}) + "\n")
+            f.write(line("2026-01-02T00:00:06.000Z", "event_msg", {"type": "turn_aborted"}) + "\n")
+        code, out = self.run_cli("watch", TID, "--timeout", "0")
+        self.assertEqual(code, 0, out)
+        self.assertEqual([line.split(" ", 1)[1] for line in out.strip().splitlines()], ["开工", "完成", "开工", "等待确认", "中止"])
+
     def test_locate_includes_archived(self):
         code, out = self.run_cli("locate", "--text", "marker-77", "--hours", "1000000")
         self.assertEqual(code, 0, out)
