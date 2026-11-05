@@ -233,6 +233,81 @@ class CourierTest(unittest.TestCase):
             self.assertEqual(courier.cmd_ui_send(args), 2)
         self.assertNotIn("click", calls)
 
+    def test_ui_send_rechecks_target_immediately_before_write(self):
+        body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
+        calls = []
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', side_effect=[args.expect_tab, '00160 archived one']), \
+             patch.object(courier, 'cua_textarea', return_value=(3, 'Message', '')), patch.object(courier, 'cua_tree', return_value=''), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier, 'cua', side_effect=lambda tool, data: calls.append((tool, data)) or '{}'):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+        self.assertFalse(any(tool == 'set_value' for tool, _ in calls))
+
+    def test_ui_send_missing_button_restores_empty_draft(self):
+        body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        value = Path(body).read_text(encoding='utf-8')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
+        calls, output = [], io.StringIO()
+        textareas = [(3, 'Message', ''), (3, 'Message', value), (3, 'Message', value), (3, 'Message', '')]
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', return_value=args.expect_tab), \
+             patch.object(courier, 'cua_textarea', side_effect=textareas), patch.object(courier, 'cua_tree', side_effect=lambda _p, _w, q: 'AXRadioButton "00159 test target"' if q == '' else ''), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier, 'cua', side_effect=lambda tool, data: calls.append((tool, data)) or '{}'), \
+             patch.object(courier.time, 'sleep'), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_send(args), 1)
+        self.assertEqual([data['value'] for tool, data in calls if tool == 'set_value'], [value, ''])
+        self.assertNotIn('click', [tool for tool, _ in calls])
+        self.assertIn('已还原', output.getvalue())
+
+    def test_ui_send_button_comes_from_same_window_and_tab_snapshot(self):
+        body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        value = Path(body).read_text(encoding='utf-8')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID, window_id=1)
+        calls = []
+        def tree(_pid, wid, query):
+            calls.append(('snapshot', {'window_id': wid, 'query': query}))
+            return 'AXRadioButton "00159 test target"\n[9] AXButton "发送"' if query == '' else ''
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', return_value=args.expect_tab), \
+             patch.object(courier, 'cua_textarea', side_effect=[(3, 'Message', ''), (3, 'Message', value)]), \
+             patch.object(courier, 'cua_tree', side_effect=tree), patch.object(courier, 'cua_front', return_value=[]), \
+             patch.object(courier, 'cua', side_effect=lambda tool, data: calls.append((tool, data)) or '{}'), patch.object(courier.time, 'sleep'):
+            self.assertEqual(courier.cmd_ui_send(args), 0)
+        self.assertEqual(calls[-2], ('snapshot', {'window_id': 1, 'query': ''}))
+        self.assertEqual(calls[-1], ('click', {'pid': 42, 'window_id': 1, 'element_index': 9}))
+
+    def test_ui_send_ignores_button_text_inside_static_content(self):
+        body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        value = Path(body).read_text(encoding='utf-8')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
+        calls, output = [], io.StringIO()
+        textareas = [(3, 'Message', ''), (3, 'Message', value), (3, 'Message', value), (3, 'Message', '')]
+        tree = 'AXRadioButton "00159 test target"\nAXStaticText = [9] AXButton "发送"'
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', return_value=args.expect_tab), \
+             patch.object(courier, 'cua_textarea', side_effect=textareas), patch.object(courier, 'cua_tree', side_effect=lambda _p, _w, q: tree if q == '' else ''), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier, 'cua', side_effect=lambda tool, data: calls.append((tool, data)) or '{}'), \
+             patch.object(courier.time, 'sleep'), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_send(args), 1)
+        self.assertNotIn('click', [tool for tool, _ in calls])
+        self.assertIn('已还原', output.getvalue())
+
+    def test_ui_send_does_not_clear_another_tab_after_postwrite_switch(self):
+        body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        value = Path(body).read_text(encoding='utf-8')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
+        calls, output = [], io.StringIO()
+        tabs = iter([args.expect_tab, args.expect_tab, '00160 archived one', '00160 archived one'])
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', side_effect=lambda *_: next(tabs)), \
+             patch.object(courier, 'cua_textarea', side_effect=[(3, 'Message', ''), (3, 'Message', value)]), patch.object(courier, 'cua_tree', return_value=''), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier, 'cua', side_effect=lambda tool, data: calls.append((tool, data)) or '{}'), \
+             patch.object(courier.time, 'sleep'), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+        self.assertEqual(len([tool for tool, _ in calls if tool == 'set_value']), 1)
+        self.assertIn('未还原', output.getvalue())
+
     def test_ui_send_rejects_duplicate_titles_before_accessing_ui(self):
         body = self.write("delivery.txt", "【投递】Claude Code·0007 → Codex·00159\n\nhello")
         index = os.path.join(self.tmp.name, "session_index.jsonl")

@@ -24,6 +24,7 @@
 
 - Never overwrites a draft: if the input box holds anything but its placeholder, it stops and asks.
 - The cua-driver helper requires the full session ID and exact tab title, then checks the tab and draft again before clicking Send. It refuses messages without an identity header.
+- If UI sending fails after writing, it restores the previous empty composer only when the same window, tab, and exact text are still present. An `未还原` result means the tab or draft changed; inspect the App before retrying. The Send button is selected from the same final AX snapshot as the active tab.
 - Background only: no full-screen control, no clipboard, never clicks links.
 - Stops and hands back to you on anything about money, credentials, rule changes, irreversible actions, or no progress.
 

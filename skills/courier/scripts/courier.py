@@ -678,8 +678,12 @@ def cua_front():
 
 
 def cua_tab(pid, wid):
+    return tab_from_tree(cua_tree(pid, wid, "AXRadioButton"))
+
+
+def tab_from_tree(tree):
     import re
-    m = re.findall(r'AXRadioButton "([^"]+)"', cua_tree(pid, wid, "AXRadioButton"))
+    m = re.findall(r'AXRadioButton "([^"]+)"', tree)
     return m[0] if m else None
 
 
@@ -727,8 +731,27 @@ def cmd_ui_switch(a):
     return 0 if tab == a.title and before == cua_front() else 1
 
 
+def restore_own_draft(a, pid, wid, index, body, prior_value):
+    """Best-effort rollback; never clear a different tab or a draft edited after our write."""
+    try:
+        window_id = getattr(a, "window_id", None)
+        if cua_target(window_id) != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
+            return False
+        current_index, _, current_value = cua_textarea(pid, wid)
+        if current_index != index or current_value != body:
+            return False
+        cua("set_value", {"pid": pid, "window_id": wid, "element_index": current_index,
+                          "value": prior_value})
+        if cua_target(window_id) != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
+            return False
+        _, _, restored = cua_textarea(pid, wid)
+        return restored == prior_value
+    except Exception:
+        return False
+
+
 def cmd_ui_send(a):
-    """写输入框（set_value 整框）+ 点「发送」。输入框非空（有草稿）一律拒绝，不覆盖。"""
+    """写输入框并点发送；未点击前失败时，只还原仍属于本次写入的草稿。"""
     import re
     with open(a.file, encoding="utf-8") as source:
         body = source.read().rstrip()
@@ -763,30 +786,48 @@ def cmd_ui_send(a):
     if value.strip() and value.strip() != placeholder.strip():
         print("拒发：输入框里有草稿，不覆盖，也不打印草稿内容。")
         return 2
+    if cua_target(getattr(a, "window_id", None)) != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
+        print("拒发：写入前目标窗口或标签页已变化；没有写入")
+        return 2
+    prior_value = "" if value.strip() == placeholder.strip() else value
+
+    def fail_after_write(reason, code):
+        restored = restore_own_draft(a, pid, wid, idx, body, prior_value)
+        print(f"{reason}；{'已还原' if restored else '未还原：目标或输入框已变化，请人工核对'}")
+        return code
+
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    cua("set_value", {"pid": pid, "window_id": wid, "element_index": idx, "value": body})
-    time.sleep(0.4)
-    if cua_target(getattr(a, "window_id", None)) != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
-        print("拒发：写入后目标窗口或标签页已变化；草稿保留")
-        return 2
-    new_idx, _, new_value = cua_textarea(pid, wid)
-    if new_idx != idx or new_value != body:
-        print("拒发：写入后的正文与原文不一致；草稿保留")
-        return 2
-    btn = None
-    for lab in SEND_LABELS:  # 按按钮文字单独查：查全部按钮会被截断
-        m = re.search(r'\[(\d+)\] AXButton "' + re.escape(lab) + '"', cua_tree(pid, wid, lab))
-        if m:
-            btn = int(m.group(1))
-            break
-    if btn is None:
-        print("写入了但找不到「发送」按钮，没有发送。请人工检查输入框。")
-        return 1
-    if cua_target(getattr(a, "window_id", None)) != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
-        print("拒发：点击前目标窗口或标签页已变化；草稿保留")
-        return 2
-    cua("click", {"pid": pid, "window_id": wid, "element_index": btn})
-    print(f"已点发送：标签页「{tab}」  SINCE={since}  前台 {before} → {cua_front()}")
+    try:
+        cua("set_value", {"pid": pid, "window_id": wid, "element_index": idx, "value": body})
+        time.sleep(0.4)
+        if cua_target(getattr(a, "window_id", None)) != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
+            return fail_after_write("拒发：写入后目标窗口或标签页已变化", 2)
+        new_idx, _, new_value = cua_textarea(pid, wid)
+        if new_idx != idx or new_value != body:
+            return fail_after_write("拒发：写入后的正文与原文不一致", 2)
+
+        # A single final AX snapshot binds the active tab and Send button to the
+        # same window and index map. Another snapshot before click invalidates
+        # cua-driver's element indices, so no cua_tab/cua_textarea follows it.
+        if cua_target(getattr(a, "window_id", None)) != (pid, wid):
+            return fail_after_write("拒发：点击前目标窗口已变化", 2)
+        tree = cua_tree(pid, wid, "")
+        if tab_from_tree(tree) != a.expect_tab:
+            return fail_after_write("拒发：点击前目标标签页已变化", 2)
+        buttons = []
+        for lab in SEND_LABELS:
+            pattern = r'(?m)^[ \t]*(?:[-*][ \t]+)?\[(\d+)\][ \t]+AXButton[ \t]+"' + re.escape(lab) + r'"(?:[ \t]|$)'
+            buttons.extend(int(x) for x in re.findall(pattern, tree))
+        if len(set(buttons)) != 1:
+            return fail_after_write("拒发：当前窗口和标签页中找不到唯一发送按钮", 1)
+        cua("click", {"pid": pid, "window_id": wid, "element_index": buttons[0]})
+    except Exception:
+        return fail_after_write("拒发：界面操作失败或发送结果不明，请用 verify 核对", 1)
+    try:
+        after = cua_front()
+    except Exception:
+        after = "无法读取"
+    print(f"已点发送：标签页「{tab}」  SINCE={since}  前台 {before} → {after}")
     print("下一步：verify / wait 核对送达与回复")
     return 0
 
