@@ -34,6 +34,13 @@ claude plugin marketplace add Maravetech/agent-courier
 claude plugin install agent-courier@courier-marketplace
 ```
 
+**Any agent via [skills.sh](https://skills.sh)** (Vercel `skills` CLI, Node 22.20+):
+
+```bash
+npx skills add Maravetech/agent-courier --skill courier -g          # pick agents interactively
+npx skills add Maravetech/agent-courier --skill courier -g -a codex -y
+```
+
 **Other agents** (Codex, OpenClaw, Hermes, …) that read skill folders:
 
 ```bash

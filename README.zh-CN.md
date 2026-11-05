@@ -34,6 +34,13 @@ claude plugin marketplace add Maravetech/agent-courier
 claude plugin install agent-courier@courier-marketplace
 ```
 
+**任意 Agent，通过 [skills.sh](https://skills.sh)**（Vercel 的 `skills` 命令行，要求 Node 22.20 及以上）：
+
+```bash
+npx skills add Maravetech/agent-courier --skill courier -g          # 交互选择装到哪些 Agent
+npx skills add Maravetech/agent-courier --skill courier -g -a codex -y
+```
+
 **其他 Agent**（Codex、OpenClaw、Hermes 等读技能目录的 Agent）：
 
 ```bash
