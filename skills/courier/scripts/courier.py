@@ -730,7 +730,7 @@ def cmd_ui_send(a):
             return 2
     idx, placeholder, value = cua_textarea(pid, wid)
     if value.strip() and value.strip() != placeholder.strip():
-        print(f"拒发：输入框里有草稿「{value[:40]}」，不覆盖。")
+        print("拒发：输入框里有草稿，不覆盖，也不打印草稿内容。")
         return 2
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     cua("set_value", {"pid": pid, "window_id": wid, "element_index": idx, "value": body})

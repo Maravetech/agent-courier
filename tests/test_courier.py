@@ -7,6 +7,8 @@ import tempfile
 import unittest
 import importlib.util
 import glob
+import io
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -213,6 +215,18 @@ class CourierTest(unittest.TestCase):
         with patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "INDEX", index), \
              patch.object(courier, "cua_target", side_effect=RuntimeError("must not access UI")):
             self.assertEqual(courier.cmd_ui_send(args), 2)
+
+    def test_ui_send_refuses_draft_without_echoing_private_text(self):
+        body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
+        out = io.StringIO()
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', return_value=args.expect_tab), \
+             patch.object(courier, 'cua_textarea', return_value=(3, 'Message', 'PRIVATE_DRAFT_MARKER')), \
+             patch.object(courier, 'cua_tree', return_value=''), patch.object(courier, 'cua_front', return_value=[]), \
+             redirect_stdout(out):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+        self.assertNotIn('PRIVATE_DRAFT_MARKER', out.getvalue())
 
     def test_ui_switch_requires_exact_unique_index_title(self):
         args = SimpleNamespace(title='00159 test')
