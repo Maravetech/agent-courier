@@ -51,6 +51,23 @@ cd agent-courier && ./install.sh          # 把 skills/courier 软链到 ~/.agen
 
 然后对照 **[PREREQUISITES.md](skills/courier/PREREQUISITES.md)** 逐项检查：macOS 授权、打开 Computer use、批准 Codex 访问、命令行登录、自检。不要跳过。
 
+## 快速示例
+
+```bash
+C=skills/courier/scripts/courier.py
+python3 -I $C find 00159                                  # 查会话 ID
+python3 -I $C compose --from-agent "Claude Code" --from-session 0007 \
+  --to <ID> --file body.txt --out msg.txt                 # 加身份抬头
+# 用 Computer use 发送 msg.txt，或走备用通道：
+python3 -I $C ui-switch "00159" && python3 -I $C ui-send --file msg.txt --expect-tab "00159"
+python3 -I $C verify <ID> --text "<片段>" --since <UTC 时间>
+python3 -I $C wait <ID> --since <UTC 时间>
+```
+
+## 环境要求
+
+macOS、Codex 桌面 App、Python 3.8 及以上（只用标准库）。可选：带 Computer use 的 Claude 桌面 App、cua-driver、Codex 命令行。实测过的版本见 [PREREQUISITES.md](skills/courier/PREREQUISITES.md)。
+
 ## 配置
 
 | 变量 | 默认值 | 含义 |
@@ -66,6 +83,8 @@ cd agent-courier && ./install.sh          # 把 skills/courier 软链到 ~/.agen
 python3 -m unittest discover -s tests -v   # 离线测试，用假的 CODEX_HOME
 claude plugin validate --strict .
 ```
+
+参与贡献请先读 [CONTRIBUTING.md](CONTRIBUTING.md)，并遵守 [行为准则](CODE_OF_CONDUCT.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
 
 ## 许可证
 

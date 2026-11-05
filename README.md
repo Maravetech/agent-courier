@@ -84,6 +84,8 @@ python3 -m unittest discover -s tests -v   # offline tests with a fake CODEX_HOM
 claude plugin validate --strict .
 ```
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately as described in [SECURITY.md](SECURITY.md).
+
 ## License
 
 [MIT](LICENSE)

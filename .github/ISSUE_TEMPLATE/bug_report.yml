@@ -1,0 +1,61 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please remove credentials, tokens and private session content before posting.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Channel
+      options:
+        - Computer use (front end, primary)
+        - cua-driver (front end, fallback)
+        - codex exec (CLI)
+        - Back end (verify / wait)
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run ...
+        2. Send ...
+        3. See ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Versions
+      description: agent-courier, macOS, Codex app, Python, and the calling agent.
+      placeholder: agent-courier 0.1.0 / macOS 15 / Codex 26.x / Python 3.12 / Claude Code
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Output of the failing `courier.py` command, with secrets and private message text removed.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed credentials, tokens and private content.
+          required: true
+        - label: I went through PREREQUISITES.md.
+          required: true
+        - label: I searched existing issues.
+          required: true
