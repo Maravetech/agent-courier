@@ -482,8 +482,10 @@ def parse_header(text):
     """从投递正文取 (发件令牌, 收件令牌)；取不到返回 None。"""
     import re
     first = text.splitlines()[0] if text else ""
-    match = re.fullmatch(r"【投递】([A-Za-z0-9][A-Za-z0-9 ._-]{0,39}·\d{3,}) → ([A-Za-z0-9][A-Za-z0-9 ._-]{0,39}·(?:[A-Za-z0-9]{3,}|新建))", first)
-    return (match.group(1), match.group(2)) if match else None
+    match = re.fullmatch(r"【投递】([A-Za-z0-9][A-Za-z0-9 ._-]{0,39}·\d{3,}) → ((?:Codex|Claude Code)·(?:\d{3,}|[0-9a-f]{8}|新建))", first)
+    if not match or not agent_ok(match.group(1).rsplit("·", 1)[0]):
+        return None
+    return match.group(1), match.group(2)
 
 
 def has_header(text):
@@ -540,9 +542,22 @@ def cmd_send(a):
     if not os.path.isfile(a.file):
         print(f"正文文件不存在：{a.file}", file=sys.stderr)
         return 2
-    if not has_header(open(a.file, encoding="utf-8").read()):
+    parsed = parse_header(open(a.file, encoding="utf-8").read())
+    if not parsed:
         print("拒发：正文第一行没有投递抬头（谁发给谁）。先用 compose 生成。", file=sys.stderr)
         return 2
+    if a.new:
+        if a.key or parsed[1] != token("Codex", "新建"):
+            print("拒发：新建会话不得给旧会话键，收件令牌必须是 Codex·新建", file=sys.stderr)
+            return 2
+    else:
+        if not a.key:
+            print("续接已有会话要给 ID 或标题；新建会话用 --new", file=sys.stderr)
+            return 2
+        d, _ = one(a.key)
+        if parsed[1] != token("Codex", session_number(d.get("thread_name"), d["id"])):
+            print("拒发：投递抬头的收件令牌与目标会话不符", file=sys.stderr)
+            return 2
     os.makedirs(LOGDIR, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     log = os.path.join(LOGDIR, f"send-{stamp}.log")
@@ -550,10 +565,6 @@ def cmd_send(a):
         argv = ["codex", "exec", "--skip-git-repo-check", "-s", a.sandbox, "-"]
         tid = None
     else:
-        if not a.key:
-            print("续接已有会话要给 ID 或标题；新建会话用 --new", file=sys.stderr)
-            return 2
-        d, _ = one(a.key)
         tid = d["id"]
         argv = ["codex", "exec", "resume", tid, "-"]
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

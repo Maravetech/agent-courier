@@ -166,6 +166,16 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(self.run_cli("send", "--new", "--file", body)[0], 2)
         self.assertEqual(self.run_cli("ui-send", "--file", body, "--expect-tab", "00159")[0], 2)
 
+    def test_send_rejects_wrong_recipient_and_malformed_target(self):
+        self.assertIsNone(courier.parse_header('【投递】Claude Code·0007 → Codex·foobar\nhello'))
+        self.assertIsNone(courier.parse_header('【投递】Claude Code·0007 → Hermes·00159\nhello'))
+        with patch.object(courier, 'AGENTS', ('Claude Code', 'Codex')):
+            self.assertIsNone(courier.parse_header('【投递】Unknown Sender·0007 → Codex·00159\nhello'))
+        wrong = self.write('wrong.txt', '【投递】Claude Code·0007 → Codex·00160\n\nhello')
+        self.assertEqual(self.run_cli('send', TID, '--file', wrong)[0], 2)
+        not_new = self.write('not-new.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        self.assertEqual(self.run_cli('send', '--new', '--file', not_new)[0], 2)
+
 
     def test_ui_send_requires_exact_target_and_rechecks_before_click(self):
         body = self.write("delivery.txt", "【投递】Claude Code·0007 → Codex·00159\n\nhello")
