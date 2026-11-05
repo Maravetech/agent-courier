@@ -36,6 +36,8 @@ class CourierTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         home = self.tmp.name
+        self.old_logdir = courier.LOGDIR
+        courier.LOGDIR = os.path.join(home, 'state')
         day = os.path.join(home, "sessions", "2026", "01", "02")
         os.makedirs(day)
         os.makedirs(os.path.join(home, "archived_sessions"))
@@ -58,6 +60,7 @@ class CourierTest(unittest.TestCase):
         self.env.pop("COURIER_AGENTS", None)
 
     def tearDown(self):
+        courier.LOGDIR = self.old_logdir
         self.tmp.cleanup()
 
     def run_cli(self, *args, env=None):
@@ -356,6 +359,60 @@ class CourierTest(unittest.TestCase):
         with patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "INDEX", index), \
              patch.object(courier, "cua_target", side_effect=RuntimeError("must not access UI")):
             self.assertEqual(courier.cmd_ui_send(args), 2)
+
+    def test_ui_send_rejects_header_for_another_tab_before_ui(self):
+        body = self.write('wrong-tab.txt', '【投递】Claude Code·0007 → Codex·00172\n\nhello')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', side_effect=AssertionError('UI must not be accessed')):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+
+    def test_cross_process_ui_lock_blocks_switch_and_send(self):
+        import textwrap
+        lock_file = os.path.join(self.tmp.name, 'codex-ui.lock')
+        holder = textwrap.dedent('''
+            import fcntl, json, os, sys, time
+            fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.write(fd, json.dumps({'pid': os.getpid(), 'command': 'fixture-holder', 'started_at': '2026-01-02T00:00:00Z'}).encode())
+            print('READY', flush=True)
+            time.sleep(5)
+        ''')
+        proc = subprocess.Popen([sys.executable, '-c', holder, lock_file], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(proc.stdout.readline().strip(), 'READY')
+            body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+            send_args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID, lock_timeout=0.1)
+            switch_args = SimpleNamespace(title='00159 test target', lock_timeout=0.1)
+            out = io.StringIO()
+            with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+                 patch.object(courier, 'LOGDIR', self.tmp.name), \
+                 patch.object(courier, 'cua_target', side_effect=AssertionError('UI must not be accessed')), \
+                 redirect_stdout(out):
+                self.assertEqual(courier.cmd_ui_switch(switch_args), 2)
+                self.assertEqual(courier.cmd_ui_send(send_args), 2)
+            self.assertIn('fixture-holder', out.getvalue())
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+            proc.stdout.close()
+
+    def test_ui_lock_releases_after_exception(self):
+        with patch.object(courier, 'LOGDIR', self.tmp.name):
+            with self.assertRaisesRegex(RuntimeError, 'fixture failure'):
+                with courier.ui_writer_lock(0.1, 'fixture'):
+                    raise RuntimeError('fixture failure')
+            with courier.ui_writer_lock(0.1, 'fixture-again'):
+                pass
+
+    def test_ui_lock_refuses_symlink_without_touching_target(self):
+        target = self.write('protected.txt', 'untouched')
+        os.symlink(target, os.path.join(self.tmp.name, 'codex-ui.lock'))
+        with patch.object(courier, 'LOGDIR', self.tmp.name):
+            with self.assertRaises(OSError):
+                with courier.ui_writer_lock(0.1, 'fixture'):
+                    pass
+        self.assertEqual(Path(target).read_text(encoding='utf-8'), 'untouched')
 
     def test_ui_send_refuses_draft_without_echoing_private_text(self):
         body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')

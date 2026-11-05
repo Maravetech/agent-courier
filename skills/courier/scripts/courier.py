@@ -589,6 +589,68 @@ def cmd_compose(a):
 LOGDIR = os.path.expanduser(os.environ.get("COURIER_STATE_DIR", "~/.local/state/courier"))
 
 
+def ui_writer_lock(timeout, command):
+    """Cross-process Codex UI writer lock; the kernel releases it on exit."""
+    import contextlib
+    import fcntl
+    import stat
+
+    @contextlib.contextmanager
+    def hold():
+        os.makedirs(LOGDIR, mode=0o700, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+        fd = os.open(os.path.join(LOGDIR, "codex-ui.lock"), flags, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise RuntimeError("Codex UI 锁文件不安全")
+            deadline = time.monotonic() + max(0, timeout)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        try:
+                            owner = json.loads(os.read(fd, 512).decode("utf-8"))
+                            import re
+                            pid = int(owner.get("pid", 0))
+                            name = re.sub(r"[^A-Za-z0-9_-]", "?", str(owner.get("command", "unknown")))[:40]
+                            detail = f"pid={pid} command={name}"
+                        except (ValueError, TypeError, UnicodeError):
+                            detail = "未知"
+                        raise TimeoutError(f"Codex UI 锁超时；持有者 {detail}") from None
+                    time.sleep(0.05)
+            os.fchmod(fd, 0o600)
+            owner = {"pid": os.getpid(), "command": command,
+                     "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, json.dumps(owner).encode("utf-8"))
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    return hold()
+
+
+def ui_locked(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def wrapped(a):
+        try:
+            with ui_writer_lock(getattr(a, "lock_timeout", 10.0), fn.__name__):
+                return fn(a)
+        except TimeoutError as exc:
+            print(f"拒绝界面操作：{exc}")
+            return 2
+    return wrapped
+
+
 def cmd_send(a):
     """命令行通道：新建会话（--new）或续接一个没在 App 里打开的会话。
 
@@ -771,6 +833,7 @@ def cmd_ui_tab(a):
     return 0
 
 
+@ui_locked
 def cmd_ui_switch(a):
     """后台点左侧会话按钮（按标题），切完核对标签页。"""
     import re
@@ -827,6 +890,7 @@ def restore_own_draft(a, pid, wid, index, body, prior_value):
         return False
 
 
+@ui_locked
 def cmd_ui_send(a):
     """写输入框并点发送；未点击前失败时，只还原仍属于本次写入的草稿。"""
     import re
@@ -857,6 +921,9 @@ def cmd_ui_send(a):
         return 2
     if tab != a.expect_tab:
         print(f"拒发：当前标签页是「{tab}」，不是「{a.expect_tab}」。先 ui-switch。")
+        return 2
+    if parsed[1] != token("Codex", session_number(tab, d["id"])):
+        print("拒发：投递抬头的收件编号与当前标签页编号不符；没有写入")
         return 2
     before = cua_front()
     try:
@@ -946,8 +1013,10 @@ def main():
     lo = sub.add_parser("locate"); lo.add_argument("--text", required=True); lo.add_argument("--since")
     lo.add_argument("--hours", type=float, default=24); lo.set_defaults(fn=cmd_locate)
     ut = sub.add_parser("ui-tab"); ut.add_argument("--window-id", type=int); ut.set_defaults(fn=cmd_ui_tab)
-    us = sub.add_parser("ui-switch"); us.add_argument("title"); us.add_argument("--window-id", type=int); us.set_defaults(fn=cmd_ui_switch)
+    us = sub.add_parser("ui-switch"); us.add_argument("title"); us.add_argument("--window-id", type=int)
+    us.add_argument("--lock-timeout", type=float, default=10); us.set_defaults(fn=cmd_ui_switch)
     ud = sub.add_parser("ui-send"); ud.add_argument("--file", required=True); ud.add_argument("--session-id", required=True); ud.add_argument("--expect-tab", required=True); ud.add_argument("--window-id", type=int)
+    ud.add_argument("--lock-timeout", type=float, default=10)
     ud.set_defaults(fn=cmd_ui_send)
     n = sub.add_parser("send"); n.add_argument("key", nargs="?"); n.add_argument("--file", required=True)
     n.add_argument("--new", action="store_true"); n.add_argument("--cwd")
