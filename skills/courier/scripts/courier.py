@@ -8,8 +8,8 @@ App 里开着的会话要走界面通道（后台电脑操作工具），见上�
 用法：
   codex_thread.py find <标题片段>              列出匹配的会话（ID、标题、rollout 路径）
   codex_thread.py status <ID或标题片段>        当前回合是否在跑 + 最近几条消息
-  codex_thread.py verify <ID或标题片段> --text <正文片段> [--since <ISO时间>]
-                                               核对这条用户消息是否已写进记录（送达证据）
+  codex_thread.py verify <ID或标题片段> --text <正文片段> [--since <ISO时间>] [--timeout 30]
+                                               轮询核对用户消息是否已写进记录（送达证据）
   codex_thread.py wait <ID或标题片段> --text <唯一投递片段> [--timeout 600]
                                                等对应投递后的首个回合结束，核对最终回复
   codex_thread.py watch <ID或标题片段>            持续输出开工 / 完成 / 中止 / 等待确认的变化
@@ -17,7 +17,7 @@ App 里开着的会话要走界面通道（后台电脑操作工具），见上�
   codex_thread.py compose --from-agent <App或Agent> --from-session <编号> (--to <ID或标题> | --new) --file <正文> [--out <文件>]
                                                加投递抬头「【投递】Claude Code·0007 → Codex·00159」；send 和前端发送都必须用带抬头的正文
   codex_thread.py ui-tab | ui-switch <完整标题> | ui-send --file <带抬头正文> --session-id <ID> --expect-tab <完整标题>
-                                               前端备用通道（cua-driver，纯无障碍接口，不截图、不抢焦点）
+                                               前端备用通道（macOS 原生 AX + cua-driver 窗口边界，不截图、不抢焦点）
   codex_thread.py send [<ID或标题>] --file <正文文件> [--new]
                                                命令行通道：--new 新建会话；给 ID 则续接没在 App 里打开的会话
 
@@ -51,9 +51,13 @@ def codex_index():
 
 
 def codex_log(thread_id):
-    hits = glob.glob(os.path.join(CODEX, "sessions", "*", "*", "*", f"rollout-*-{thread_id}.jsonl"))
-    hits += glob.glob(os.path.join(CODEX, "archived_sessions", "**", f"rollout-*-{thread_id}.jsonl"), recursive=True)
-    return max(hits, key=os.path.getmtime) if hits else None
+    """All rollout segments for one session, ordered by their rollout timestamp."""
+    key = glob.escape(thread_id)
+    hits = []
+    for suffix in (f"-{key}.jsonl", f"-{key}_*.jsonl"):
+        hits += glob.glob(os.path.join(CODEX, "sessions", "*", "*", "*", "rollout-*" + suffix))
+        hits += glob.glob(os.path.join(CODEX, "archived_sessions", "**", "rollout-*" + suffix), recursive=True)
+    return sorted(set(hits), key=lambda p: os.path.basename(p))
 
 
 def resolve(key):
@@ -85,6 +89,12 @@ def one(key):
 
 
 def events(path):
+    """Stream one log or merge all segments by event timestamp."""
+    if isinstance(path, (list, tuple)):
+        import heapq
+        streams = (events(item) for item in path)
+        yield from heapq.merge(*streams, key=lambda row: row.get("timestamp", ""))
+        return
     with open(path, encoding="utf-8") as f:
         for line in f:
             try:
@@ -219,7 +229,7 @@ def all_logs():
 
 def log_id(path):
     base = os.path.basename(path)[:-6]
-    return base if APP == "claude" else base.split("-", 6)[-1]
+    return base if APP == "claude" else base.split("-", 6)[-1].split("_", 1)[0]
 
 
 def cmd_watch_once(a):
@@ -230,7 +240,8 @@ def cmd_watch_once(a):
     targets = [one(k) for k in a.keys]
     deadline = time.time() + (a.timeout if a.timeout is not None else 3600)
     while True:
-        for d, path in targets:
+        for d, _ in targets:
+            path = rollout_path(d["id"])
             msgs, running, last_done = scan(path, a.since)
             if last_done and last_done[0] >= a.since and not running:
                 replies = [m for m in msgs if m[1] == "assistant"]
@@ -251,7 +262,9 @@ def cmd_find(a):
         print("没找到")
         return 1
     for d in hits:
-        print(f"{d['id']}\t{d.get('thread_name')}\t{rollout_path(d['id'])}")
+        paths = rollout_path(d["id"])
+        shown = "; ".join(paths) if isinstance(paths, list) else paths
+        print(f"{d['id']}\t{d.get('thread_name')}\t{shown}")
     return 0
 
 
@@ -261,13 +274,16 @@ def cmd_locate(a):
     cutoff = time.time() - a.hours * 3600
     idx = load_index()
     found = 0
-    for path in sorted(files, key=os.path.getmtime, reverse=True):
-        if os.path.getmtime(path) < cutoff:
+    groups = {}
+    for path in files:
+        groups.setdefault(log_id(path), []).append(path)
+    for tid, paths in sorted(groups.items(), key=lambda item: max(os.path.getmtime(p) for p in item[1]), reverse=True):
+        if max(os.path.getmtime(p) for p in paths) < cutoff:
             continue
-        msgs, _, _ = scan(path, a.since)
+        msgs, _, _ = scan(paths, a.since)
         if any(r == "user" and a.text in t for _, r, t in msgs):
-            tid = log_id(path)
-            print(f"{tid}\t{(idx.get(tid) or {}).get('thread_name', '(索引暂无标题)')}\t{path}")
+            latest = max(paths, key=(lambda p: os.path.basename(p)) if APP == "codex" else os.path.getmtime)
+            print(f"{tid}\t{(idx.get(tid) or {}).get('thread_name', '(索引暂无标题)')}\t{latest}")
             found += 1
     if not found:
         print(f"没找到含「{a.text}」的用户消息（最近 {a.hours} 小时）")
@@ -278,28 +294,42 @@ def cmd_status(a):
     d, path = one(a.key)
     msgs, running, last_done = scan(path)
     print(f"会话：{d.get('thread_name')}  {d['id']}")
-    print(f"记录：{path}")
+    print(f"记录：{'; '.join(path) if isinstance(path, list) else path}")
     print(f"回合：{'正在运行' if running else '空闲'}；最后结束：{last_done}")
-    for ts, role, t in msgs[-a.n:]:
+    for ts, role, t in (msgs[-a.n:] if a.n > 0 else []):
         print(f"--- {ts} {role}\n{t[:a.chars]}")
     return 0
 
 
 def cmd_verify(a):
-    d, path = one(a.key)
-    msgs, _, _ = scan(path, a.since)
-    for ts, role, t in msgs:
-        if role == "user" and a.text in t:
-            print(f"送达：{ts} user 消息含「{a.text}」  会话 {d['id']}")
-            return 0
-    print(f"未送达：{d['id']} 在 {a.since or '全部记录'} 之后没有含「{a.text}」的用户消息")
-    return 1
+    deadline = time.monotonic() + max(0, a.timeout)
+    while True:
+        hits = resolve(a.key)
+        if len(hits) > 1:
+            print("会话不唯一；verify 请给完整 ID", file=sys.stderr)
+            return 2
+        d = hits[0] if hits else None
+        path = rollout_path(d["id"]) if d else None
+        if path:
+            try:
+                msgs, _, _ = scan(path, a.since)
+            except FileNotFoundError:
+                msgs = []  # record can be created or rotated between polls
+            for ts, role, t in msgs:
+                if role == "user" and a.text in t:
+                    print(f"送达：{ts} user 消息含「{a.text}」  会话 {d['id']}")
+                    return 0
+        if time.monotonic() >= deadline:
+            print(f"未送达：{d['id'] if d else a.key} 在 {a.since or '全部记录'} 之后没有含「{a.text}」的用户消息")
+            return 1
+        time.sleep(max(0.05, a.interval))
 
 
 def cmd_wait(a):
-    d, path = one(a.key)
+    d, _ = one(a.key)
     deadline = time.time() + a.timeout
     while True:
+        path = rollout_path(d["id"])
         anchors, replies, last_done, running = (delivery_turn(path, a.text) if a.text
                                                else legacy_turn(path, a.since))
         if anchors > 1:
@@ -307,13 +337,17 @@ def cmd_wait(a):
             return 2
         if anchors == 1 and last_done:
             print(f"回合结束：{last_done[1]} @ {last_done[0]}")
+            if last_done[1] == "interleaved":
+                print("投递后插入了其他用户消息，不能把回复归给这次投递", file=sys.stderr)
+                return 1
             if last_done[1] not in ("task_complete", "end_turn"):
                 print("回合中止，未取得完成回执", file=sys.stderr)
                 return 1
-            if not replies:
+            assistants = [m for m in replies if m[1] == "assistant" and m[2].strip()]
+            if not assistants:
                 print("（这一回合没有助手回复）")
                 return 1
-            ts, _, t = replies[-1]
+            ts, _, t = assistants[-1]
             # 回复抬头核对：按本轮最后一条投递的抬头推出应有的回复抬头
             sent = [m for m in replies if m[1] == "user" and parse_header(m[2])]
             if not sent:
@@ -321,7 +355,9 @@ def cmd_wait(a):
                 return 1
             f_tok, t_tok = parse_header(sent[0][2])
             expected_target = token(APP_TOKEN[APP], session_number(d.get("thread_name"), d["id"]))
-            if t_tok != expected_target and not (t_tok == token(APP_TOKEN[APP], "新建") and d.get("thread_name") == "(索引里没有)"):
+            new_session_delivery = (APP == "codex" and t_tok == token("Codex", "新建")
+                                    and first_real_user(path) == sent[0][2])
+            if t_tok != expected_target and not new_session_delivery:
                 print(f"投递收件令牌与目标会话不符：{t_tok} != {expected_target}", file=sys.stderr)
                 return 1
             want = reply_line(f_tok, t_tok)
@@ -352,10 +388,13 @@ def delivery_turn(path, text):
                 if isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
                     continue
                 value = claude_text(c, "user")
-                if value.strip() and not value.lstrip().startswith("<") and text in value:
-                    anchors += 1
-                    if anchors == 1:
-                        replies, done, running = [(ts, "user", value)], None, True
+                if value.strip() and not value.lstrip().startswith("<"):
+                    if text in value:
+                        anchors += 1
+                        if anchors == 1:
+                            replies, done, running = [(ts, "user", value)], None, True
+                    if anchors == 1 and done is None and replies and value != replies[0][2]:
+                        done, running = (ts, "interleaved"), False
             elif anchors == 1 and done is None and d.get("type") == "assistant":
                 value = claude_text(m.get("content"), "assistant")
                 if value.strip():
@@ -367,12 +406,15 @@ def delivery_turn(path, text):
         ts = d.get("timestamp", "")
         if d.get("type") == "response_item" and p.get("type") == "message":
             role, value = p.get("role"), text_of(p)
-            if role == "user" and is_real_user(value) and text in value:
-                anchors += 1
-                if anchors == 1:
-                    replies = [(ts, "user", value)]
-                    done = None
-                    running = True
+            if role == "user" and is_real_user(value):
+                if text in value:
+                    anchors += 1
+                    if anchors == 1:
+                        replies = [(ts, "user", value)]
+                        done = None
+                        running = True
+                if anchors == 1 and done is None and replies and value != replies[0][2]:
+                    done, running = (ts, "interleaved"), False
             elif anchors == 1 and done is None and role == "assistant":
                 replies.append((ts, role, value))
         elif anchors == 1 and done is None and d.get("type") == "event_msg":
@@ -380,6 +422,17 @@ def delivery_turn(path, text):
                 done = (ts, p["type"])
                 running = False
     return anchors, replies, done, running
+
+
+def first_real_user(path):
+    """Read only the first real Codex user message, excluding injected context records."""
+    for row in events(path):
+        payload = row.get("payload") or {}
+        if row.get("type") == "response_item" and payload.get("type") == "message" and payload.get("role") == "user":
+            value = text_of(payload)
+            if is_real_user(value):
+                return value
+    return None
 
 
 def legacy_turn(path, since):
@@ -391,6 +444,9 @@ def legacy_turn(path, since):
     if not users:
         return 0, [], None, running
     replies = msgs[users[-1]:]
+    intervening = next((m for m in replies[1:] if m[1] == "user"), None)
+    if intervening:
+        return 1, replies, (intervening[0], "interleaved"), False
     return 1, replies, done, running
 
 
@@ -408,10 +464,11 @@ def status_event(row):
 
 
 def cmd_watch_stream(a):
-    _, path = one(a.keys[0])
+    d, _ = one(a.keys[0])
     deadline = time.monotonic() + a.timeout if a.timeout is not None else None
     seen, current = 0, None
     while True:
+        path = rollout_path(d["id"])
         rows = list(events(path))
         if len(rows) < seen:
             seen, current = 0, None
@@ -482,8 +539,10 @@ def parse_header(text):
     """从投递正文取 (发件令牌, 收件令牌)；取不到返回 None。"""
     import re
     first = text.splitlines()[0] if text else ""
-    match = re.fullmatch(r"【投递】([A-Za-z0-9][A-Za-z0-9 ._-]{0,39}·\d{3,}) → ([A-Za-z0-9][A-Za-z0-9 ._-]{0,39}·(?:[A-Za-z0-9]{3,}|新建))", first)
-    return (match.group(1), match.group(2)) if match else None
+    match = re.fullmatch(r"【投递】([A-Za-z0-9][A-Za-z0-9 ._-]{0,39}·\d{3,}) → ((?:Codex|Claude Code)·(?:\d{3,}|[0-9a-f]{8}|新建))", first)
+    if not match or not agent_ok(match.group(1).rsplit("·", 1)[0]):
+        return None
+    return match.group(1), match.group(2)
 
 
 def has_header(text):
@@ -530,6 +589,68 @@ def cmd_compose(a):
 LOGDIR = os.path.expanduser(os.environ.get("COURIER_STATE_DIR", "~/.local/state/courier"))
 
 
+def ui_writer_lock(timeout, command):
+    """Cross-process Codex UI writer lock; the kernel releases it on exit."""
+    import contextlib
+    import fcntl
+    import stat
+
+    @contextlib.contextmanager
+    def hold():
+        os.makedirs(LOGDIR, mode=0o700, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+        fd = os.open(os.path.join(LOGDIR, "codex-ui.lock"), flags, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise RuntimeError("Codex UI 锁文件不安全")
+            deadline = time.monotonic() + max(0, timeout)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        try:
+                            owner = json.loads(os.read(fd, 512).decode("utf-8"))
+                            import re
+                            pid = int(owner.get("pid", 0))
+                            name = re.sub(r"[^A-Za-z0-9_-]", "?", str(owner.get("command", "unknown")))[:40]
+                            detail = f"pid={pid} command={name}"
+                        except (ValueError, TypeError, UnicodeError):
+                            detail = "未知"
+                        raise TimeoutError(f"Codex UI 锁超时；持有者 {detail}") from None
+                    time.sleep(0.05)
+            os.fchmod(fd, 0o600)
+            owner = {"pid": os.getpid(), "command": command,
+                     "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, json.dumps(owner).encode("utf-8"))
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    return hold()
+
+
+def ui_locked(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def wrapped(a):
+        try:
+            with ui_writer_lock(getattr(a, "lock_timeout", 10.0), fn.__name__):
+                return fn(a)
+        except TimeoutError as exc:
+            print(f"拒绝界面操作：{exc}")
+            return 2
+    return wrapped
+
+
 def cmd_send(a):
     """命令行通道：新建会话（--new）或续接一个没在 App 里打开的会话。
 
@@ -540,9 +661,22 @@ def cmd_send(a):
     if not os.path.isfile(a.file):
         print(f"正文文件不存在：{a.file}", file=sys.stderr)
         return 2
-    if not has_header(open(a.file, encoding="utf-8").read()):
+    parsed = parse_header(open(a.file, encoding="utf-8").read())
+    if not parsed:
         print("拒发：正文第一行没有投递抬头（谁发给谁）。先用 compose 生成。", file=sys.stderr)
         return 2
+    if a.new:
+        if a.key or parsed[1] != token("Codex", "新建"):
+            print("拒发：新建会话不得给旧会话键，收件令牌必须是 Codex·新建", file=sys.stderr)
+            return 2
+    else:
+        if not a.key:
+            print("续接已有会话要给 ID 或标题；新建会话用 --new", file=sys.stderr)
+            return 2
+        d, _ = one(a.key)
+        if parsed[1] != token("Codex", session_number(d.get("thread_name"), d["id"])):
+            print("拒发：投递抬头的收件令牌与目标会话不符", file=sys.stderr)
+            return 2
     os.makedirs(LOGDIR, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     log = os.path.join(LOGDIR, f"send-{stamp}.log")
@@ -550,10 +684,6 @@ def cmd_send(a):
         argv = ["codex", "exec", "--skip-git-repo-check", "-s", a.sandbox, "-"]
         tid = None
     else:
-        if not a.key:
-            print("续接已有会话要给 ID 或标题；新建会话用 --new", file=sys.stderr)
-            return 2
-        d, _ = one(a.key)
         tid = d["id"]
         argv = ["codex", "exec", "resume", tid, "-"]
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -585,6 +715,7 @@ def cmd_send(a):
 # 全程前台不变。唯一抢过焦点的是 AXPress 输入框本身 —— 本实现从不点输入框。
 
 CODEX_BUNDLE = "com.openai.codex"
+USE_NATIVE_AX = True
 STOP_LABELS = tuple(x for x in os.environ.get("COURIER_STOP_LABELS", "停止,Stop,停止する,Stopp,Arrêter,Detener").split(",") if x)
 SEND_LABELS = tuple(x for x in os.environ.get("COURIER_SEND_LABELS", "发送,Send,送信,Senden,Envoyer,Enviar").split(",") if x)
 
@@ -598,8 +729,8 @@ def cua(tool, args):
     return r.stdout
 
 
-def cua_target():
-    """返回 (pid, window_id)：Codex 在屏上的主窗口。"""
+def cua_target(window_id=None):
+    """返回 (pid, window_id)：多窗口时必须明确指定目标窗口。"""
     apps = json.loads(cua("list_apps", {}))["apps"]
     pid = next((a["pid"] for a in apps if a.get("bundle_id") == CODEX_BUNDLE and a.get("running")), None)
     if not pid:
@@ -608,13 +739,89 @@ def cua_target():
     wins = [w for w in wins if w.get("is_on_screen") and w["bounds"]["height"] > 200]
     if not wins:
         raise RuntimeError("Codex 没有在屏上的主窗口（最小化或在别的桌面空间）")
+    if window_id is not None:
+        chosen = [w for w in wins if w["window_id"] == window_id]
+        if len(chosen) != 1:
+            raise RuntimeError("指定的 Codex 窗口不在屏上")
+        return pid, chosen[0]["window_id"]
     if len(wins) != 1:
-        raise RuntimeError("Codex 同时有多个屏上窗口；无法安全确定目标窗口")
+        raise RuntimeError("Codex 同时有多个屏上窗口；请用 --window-id 指定目标")
     return pid, wins[0]["window_id"]
 
 
+def native_ui_action(action, title="", body="", window_id=None):
+    """Bind a WindowServer window to the bundle's unique native AXWindow.
+
+    Only window geometry comes from cua-driver. Controls and actions are all
+    resolved inside the matched AXWindow by the Swift bridge. Body uses stdin,
+    so it never appears in argv or diagnostics.
+    """
+    import subprocess
+    pid, wid = cua_target(window_id)
+    windows = json.loads(cua("list_windows", {"pid": pid}))["windows"]
+    matches = [w for w in windows if w.get("pid") == pid and w.get("window_id") == wid
+               and w.get("is_on_screen")]
+    if len(matches) != 1:
+        raise RuntimeError("屏上窗口无法唯一确认")
+    bounds = matches[0]["bounds"]
+    script = os.path.join(os.path.dirname(__file__), "codex_ax.swift")
+    cmd = ["swift", script, action, title, str(pid),
+           *(str(bounds[k]) for k in ("x", "y", "width", "height")),
+           ",".join(SEND_LABELS)]
+    run = subprocess.run(cmd, input=body, capture_output=True, text=True, timeout=45)
+    try:
+        result = json.loads(run.stdout)
+    except ValueError:
+        raise RuntimeError("原生 AX 桥接未返回可解析结果") from None
+    if not isinstance(result, dict) or (run.returncode == 0) != bool(result.get("ok")):
+        raise RuntimeError("原生 AX 桥接结果与退出码不一致")
+    return result
+
+
 def cua_tree(pid, wid, query):
-    return json.loads(cua("get_window_state", {"pid": pid, "window_id": wid, "capture_mode": "ax", "query": query}))["tree_markdown"]
+    """Return only the AXWindow proved to belong to ``wid``.
+
+    CuaDriver may render several top-level AXWindows in a single requested
+    window snapshot. Its element indices still refer to that entire snapshot,
+    so retain the original indices while discarding every other subtree.
+    """
+    import re
+    state = json.loads(cua("get_window_state", {"pid": pid, "window_id": wid,
+                                               "capture_mode": "ax", "query": ""}))
+    if state.get("window_id") != wid:
+        raise RuntimeError("AX 快照的窗口 ID 与请求不符")
+    lines = state["tree_markdown"].splitlines(keepends=True)
+    roots = []
+    for pos, line in enumerate(lines):
+        match = re.match(r'^- \[\d+\] AXWindow "((?:[^"\\]|\\.)*)"', line)
+        if match:
+            try:
+                title = json.loads('"' + match.group(1) + '"')
+            except ValueError:
+                raise RuntimeError("AXWindow 标题无法解析") from None
+            roots.append((pos, title))
+    if not roots:
+        raise RuntimeError("AX 快照中找不到可归属的 AXWindow")
+    wins = json.loads(cua("list_windows", {"pid": pid}))["windows"]
+    chosen = [w for w in wins if w.get("window_id") == wid and w.get("is_on_screen")
+              and w.get("bounds", {}).get("height", 0) > 200]
+    if len(chosen) != 1 or not chosen[0].get("title"):
+        raise RuntimeError("无法确认指定 AXWindow 在屏上及其标题")
+    if len(roots) > 1:
+        # An AX root without a unique WindowServer counterpart may be a stale
+        # or duplicated representation. Never infer its owner from ordering.
+        for _, title in roots:
+            owners = [w for w in wins if title and w.get("title") == title
+                      and w.get("bounds", {}).get("height", 0) > 200]
+            if len(owners) != 1:
+                raise RuntimeError("AXWindow 无法逐一对应真实窗口；拒绝操作")
+    matches = [i for i, (_, title) in enumerate(roots) if title == chosen[0]["title"]]
+    if len(matches) != 1:
+        raise RuntimeError("AXWindow 与指定窗口无法唯一对应；拒绝操作")
+    i = matches[0]
+    start = roots[i][0]
+    end = roots[i + 1][0] if i + 1 < len(roots) else len(lines)
+    return "".join(lines[start:end])
 
 
 def cua_front():
@@ -623,17 +830,25 @@ def cua_front():
 
 
 def cua_tab(pid, wid):
+    return tab_from_tree(cua_tree(pid, wid, "AXRadioButton"))
+
+
+def tab_from_tree(tree):
     import re
-    m = re.findall(r'AXRadioButton "([^"]+)"', cua_tree(pid, wid, "AXRadioButton"))
-    return m[0] if m else None
+    tabs = re.findall(r'(?m)^[ \t]*(?:[-*][ \t]+)?\[\d+\][ \t]+AXRadioButton[ \t]+"([^"]+)"', tree)
+    if len(tabs) > 1:
+        raise RuntimeError("当前 AXWindow 内有多个标签页候选；拒绝猜测")
+    return tabs[0] if tabs else None
 
 
 def cua_textarea(pid, wid):
-    """返回 (index, 占位文字, 当前值)。值等于占位文字才算空。"""
+    """返回 (index, 占位文字, 当前值)。读取未过滤树，保留多行 AXValue。"""
     import re
-    m = re.search(r'\[(\d+)\] AXTextArea "([^"]*)"(?: = "((?:[^"\\]|\\.)*))?', cua_tree(pid, wid, "AXTextArea"))
-    if not m:
-        raise RuntimeError("找不到输入框")
+    pattern = r'(?m)^[ \t]*(?:[-*][ \t]+)?\[(\d+)\][ \t]+AXTextArea[ \t]+"([^"]*)"(?: = "((?:[^"\\]|\\.)*))?'
+    matches = list(re.finditer(pattern, cua_tree(pid, wid, "")))
+    if len(matches) != 1:
+        raise RuntimeError("当前 AXWindow 中找不到唯一输入框")
+    m = matches[0]
     value = m.group(3) or ""
     try:
         value = json.loads('"' + value + '"')
@@ -642,34 +857,87 @@ def cua_textarea(pid, wid):
     return int(m.group(1)), m.group(2), value
 
 
+@ui_locked
 def cmd_ui_tab(a):
-    pid, wid = cua_target()
+    if USE_NATIVE_AX:
+        result = native_ui_action("tab", window_id=getattr(a, "window_id", None))
+        if not result["ok"]:
+            print(f"无法确认当前标签页：{result['reason']}")
+            return 2
+        print(f"当前标签页：{result['tab']}  前台：{result['front_before']} → {result['front_after']}")
+        return 0
+    pid, wid = cua_target(getattr(a, "window_id", None))
     print(f"当前标签页：{cua_tab(pid, wid)}  前台：{cua_front()}")
     return 0
 
 
+@ui_locked
 def cmd_ui_switch(a):
     """后台点左侧会话按钮（按标题），切完核对标签页。"""
     import re
-    pid, wid = cua_target()
+    matches = [d for d in load_index().values() if d.get("thread_name") == a.title]
+    if len(matches) != 1:
+        print("拒绝切页：必须给索引中唯一的完整标题")
+        return 2
+    if USE_NATIVE_AX:
+        result = native_ui_action("switch", a.title, window_id=getattr(a, "window_id", None))
+        if not result["ok"]:
+            print(f"未切换：目标「{a.title}」，实际标签页「{result.get('actual_tab', '无法判定')}」；{result['reason']}")
+            return 2
+        print(f"已切换：标签页「{result['tab']}」  前台 {result['front_before']} → {result['front_after']}")
+        return 0
+    pid, wid = cua_target(getattr(a, "window_id", None))
     before = cua_front()
-    hits = re.findall(r'\[(\d+)\] AXButton "([^"]+)"', cua_tree(pid, wid, a.title))
-    hits = [(i, t) for i, t in hits if a.title in t]
+    try:
+        tree = cua_tree(pid, wid, a.title)
+    except RuntimeError:
+        print(f"未切换：目标「{a.title}」，实际标签页无法判定（窗口归属不明）")
+        return 2
+    hits = re.findall(r'(?m)^[ \t]*(?:[-*][ \t]+)?\[(\d+)\][ \t]+AXButton[ \t]+"([^"]+)"', tree)
+    hits = [(i, t) for i, t in hits if a.title == t]
     if not hits:
         print(f"左侧列表里没找到「{a.title}」")
         return 1
     if len(hits) != 1:
         print(f"左侧列表有 {len(hits)} 个标题匹配；请给唯一完整标题")
         return 2
-    cua("click", {"pid": pid, "window_id": wid, "element_index": int(hits[0][0])})
-    time.sleep(1.5)
-    tab = cua_tab(pid, wid)
-    print(f"已切换：标签页「{tab}」  前台 {before} → {cua_front()}")
-    return 0 if tab and a.title in tab else 1
+    try:
+        cua("click", {"pid": pid, "window_id": wid, "element_index": int(hits[0][0])})
+        time.sleep(1.5)
+        tab = cua_tab(pid, wid)
+    except RuntimeError:
+        print(f"未切换：目标「{a.title}」，实际标签页无法判定（点击或读回失败）")
+        return 1
+    after = cua_front()
+    if tab != a.title or before != after:
+        print(f"未切换：目标「{a.title}」，实际标签页「{tab}」  前台 {before} → {after}")
+        return 1
+    print(f"已切换：标签页「{tab}」  前台 {before} → {after}")
+    return 0
 
 
+def restore_own_draft(a, pid, wid, index, body, prior_value):
+    """Best-effort rollback; never clear a different tab or a draft edited after our write."""
+    try:
+        window_id = getattr(a, "window_id", None)
+        if cua_target(window_id) != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
+            return False
+        current_index, _, current_value = cua_textarea(pid, wid)
+        if current_index != index or current_value != body:
+            return False
+        cua("set_value", {"pid": pid, "window_id": wid, "element_index": current_index,
+                          "value": prior_value})
+        if cua_target(window_id) != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
+            return False
+        _, _, restored = cua_textarea(pid, wid)
+        return restored == prior_value
+    except Exception:
+        return False
+
+
+@ui_locked
 def cmd_ui_send(a):
-    """写输入框（set_value 整框）+ 点「发送」。输入框非空（有草稿）一律拒绝，不覆盖。"""
+    """写输入框并点发送；未点击前失败时，只还原仍属于本次写入的草稿。"""
     import re
     with open(a.file, encoding="utf-8") as source:
         body = source.read().rstrip()
@@ -690,44 +958,96 @@ def cmd_ui_send(a):
     if not parsed or parsed[1] != token("Codex", session_number(d.get("thread_name"), d["id"])):
         print("拒发：正文收件令牌与目标会话不符", file=sys.stderr)
         return 2
-    pid, wid = cua_target()
-    tab = cua_tab(pid, wid)
+    if USE_NATIVE_AX:
+        current = native_ui_action("tab", window_id=getattr(a, "window_id", None))
+        if not current["ok"] or current.get("tab") != a.expect_tab:
+            print(f"拒发：当前标签页是「{current.get('tab', '无法判定')}」，不是「{a.expect_tab}」；没有写入")
+            return 2
+        if parsed[1] != token("Codex", session_number(current["tab"], d["id"])):
+            print("拒发：投递抬头的收件编号与当前标签页编号不符；没有写入")
+            return 2
+        since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        result = native_ui_action("send", a.expect_tab, body, getattr(a, "window_id", None))
+        if not result["ok"]:
+            suffix = ("；送达结果不明，请用 verify 核对" if result.get("sent_possible") else
+                      "；已还原" if result.get("restored") is True else
+                      "；未还原：目标或输入框已变化，请人工核对" if result.get("restored") is False else "；没有写入")
+            print(f"拒发：{result['reason']}{suffix}")
+            return 2
+        print(f"已点发送：标签页「{result['tab']}」  SINCE={since}  前台 {result['front_before']} → {result['front_after']}")
+        print("下一步：verify / wait 核对送达与回复")
+        return 0
+    try:
+        pid, wid = cua_target(getattr(a, "window_id", None))
+        tab = cua_tab(pid, wid)
+    except RuntimeError:
+        print("拒发：窗口归属或标签页无法确认；没有写入")
+        return 2
     if tab != a.expect_tab:
         print(f"拒发：当前标签页是「{tab}」，不是「{a.expect_tab}」。先 ui-switch。")
         return 2
+    if parsed[1] != token("Codex", session_number(tab, d["id"])):
+        print("拒发：投递抬头的收件编号与当前标签页编号不符；没有写入")
+        return 2
     before = cua_front()
-    for lab in STOP_LABELS:  # 界面有「停止」按钮 = 目标会话正在跑回合：不写入、不插话
-        if re.search(r'\] AXButton "' + re.escape(lab) + '"', cua_tree(pid, wid, lab)):
-            print(f"拒发：目标会话正在运行回合（界面有「{lab}」按钮）。先 watch 等它状态恢复。")
-            return 2
-    idx, placeholder, value = cua_textarea(pid, wid)
+    try:
+        for lab in STOP_LABELS:  # 界面有「停止」按钮 = 目标会话正在跑回合：不写入、不插话
+            if re.search(r'\] AXButton "' + re.escape(lab) + '"', cua_tree(pid, wid, lab)):
+                print(f"拒发：目标会话正在运行回合（界面有「{lab}」按钮）。先 watch 等它状态恢复。")
+                return 2
+        idx, placeholder, value = cua_textarea(pid, wid)
+    except RuntimeError:
+        print("拒发：目标窗口或输入框无法唯一确认；没有写入")
+        return 2
     if value.strip() and value.strip() != placeholder.strip():
-        print(f"拒发：输入框里有草稿「{value[:40]}」，不覆盖。")
+        print("拒发：输入框里有草稿，不覆盖，也不打印草稿内容。")
         return 2
+    try:
+        still_target = cua_target(getattr(a, "window_id", None)) == (pid, wid) and cua_tab(pid, wid) == a.expect_tab
+    except RuntimeError:
+        still_target = False
+    if not still_target:
+        print("拒发：写入前目标窗口或标签页已变化；没有写入")
+        return 2
+    prior_value = "" if value.strip() == placeholder.strip() else value
+
+    def fail_after_write(reason, code):
+        restored = restore_own_draft(a, pid, wid, idx, body, prior_value)
+        print(f"{reason}；{'已还原' if restored else '未还原：目标或输入框已变化，请人工核对'}")
+        return code
+
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    cua("set_value", {"pid": pid, "window_id": wid, "element_index": idx, "value": body})
-    time.sleep(0.4)
-    if cua_target() != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
-        print("拒发：写入后目标窗口或标签页已变化；草稿保留")
-        return 2
-    new_idx, _, new_value = cua_textarea(pid, wid)
-    if new_idx != idx or new_value != body:
-        print("拒发：写入后的正文与原文不一致；草稿保留")
-        return 2
-    btn = None
-    for lab in SEND_LABELS:  # 按按钮文字单独查：查全部按钮会被截断
-        m = re.search(r'\[(\d+)\] AXButton "' + re.escape(lab) + '"', cua_tree(pid, wid, lab))
-        if m:
-            btn = int(m.group(1))
-            break
-    if btn is None:
-        print("写入了但找不到「发送」按钮，没有发送。请人工检查输入框。")
-        return 1
-    if cua_target() != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
-        print("拒发：点击前目标窗口或标签页已变化；草稿保留")
-        return 2
-    cua("click", {"pid": pid, "window_id": wid, "element_index": btn})
-    print(f"已点发送：标签页「{tab}」  SINCE={since}  前台 {before} → {cua_front()}")
+    try:
+        cua("set_value", {"pid": pid, "window_id": wid, "element_index": idx, "value": body})
+        time.sleep(0.4)
+        if cua_target(getattr(a, "window_id", None)) != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
+            return fail_after_write("拒发：写入后目标窗口或标签页已变化", 2)
+        new_idx, _, new_value = cua_textarea(pid, wid)
+        if new_idx != idx or new_value != body:
+            return fail_after_write("拒发：写入后的正文与原文不一致", 2)
+
+        # A single final AX snapshot binds the active tab and Send button to the
+        # same window and index map. Another snapshot before click invalidates
+        # cua-driver's element indices, so no cua_tab/cua_textarea follows it.
+        if cua_target(getattr(a, "window_id", None)) != (pid, wid):
+            return fail_after_write("拒发：点击前目标窗口已变化", 2)
+        tree = cua_tree(pid, wid, "")
+        if tab_from_tree(tree) != a.expect_tab:
+            return fail_after_write("拒发：点击前目标标签页已变化", 2)
+        buttons = []
+        for lab in SEND_LABELS:
+            pattern = r'(?m)^[ \t]*(?:[-*][ \t]+)?\[(\d+)\][ \t]+AXButton[ \t]+"' + re.escape(lab) + r'"(?:[ \t]|$)'
+            buttons.extend(int(x) for x in re.findall(pattern, tree))
+        if len(set(buttons)) != 1:
+            return fail_after_write("拒发：当前窗口和标签页中找不到唯一发送按钮", 1)
+        cua("click", {"pid": pid, "window_id": wid, "element_index": buttons[0]})
+    except Exception:
+        return fail_after_write("拒发：界面操作失败或发送结果不明，请用 verify 核对", 1)
+    try:
+        after = cua_front()
+    except Exception:
+        after = "无法读取"
+    print(f"已点发送：标签页「{tab}」  SINCE={since}  前台 {before} → {after}")
     print("下一步：verify / wait 核对送达与回复")
     return 0
 
@@ -746,7 +1066,8 @@ def main():
     s.add_argument("-n", type=int, default=4); s.add_argument("--chars", type=int, default=600)
     s.set_defaults(fn=cmd_status)
     v = sub.add_parser("verify"); v.add_argument("key"); v.add_argument("--text", required=True)
-    v.add_argument("--since"); v.set_defaults(fn=cmd_verify)
+    v.add_argument("--since"); v.add_argument("--timeout", type=float, default=30)
+    v.add_argument("--interval", type=float, default=1); v.set_defaults(fn=cmd_verify)
     w = sub.add_parser("wait"); w.add_argument("key"); w.add_argument("--text"); w.add_argument("--since")
     w.add_argument("--timeout", type=int, default=600); w.add_argument("--interval", type=float, default=3)
     w.set_defaults(fn=cmd_wait)
@@ -755,9 +1076,12 @@ def main():
     c.add_argument("--file", required=True); c.add_argument("--out"); c.set_defaults(fn=cmd_compose)
     lo = sub.add_parser("locate"); lo.add_argument("--text", required=True); lo.add_argument("--since")
     lo.add_argument("--hours", type=float, default=24); lo.set_defaults(fn=cmd_locate)
-    sub.add_parser("ui-tab").set_defaults(fn=cmd_ui_tab)
-    us = sub.add_parser("ui-switch"); us.add_argument("title"); us.set_defaults(fn=cmd_ui_switch)
-    ud = sub.add_parser("ui-send"); ud.add_argument("--file", required=True); ud.add_argument("--session-id", required=True); ud.add_argument("--expect-tab", required=True)
+    ut = sub.add_parser("ui-tab"); ut.add_argument("--window-id", type=int)
+    ut.add_argument("--lock-timeout", type=float, default=10); ut.set_defaults(fn=cmd_ui_tab)
+    us = sub.add_parser("ui-switch"); us.add_argument("title"); us.add_argument("--window-id", type=int)
+    us.add_argument("--lock-timeout", type=float, default=10); us.set_defaults(fn=cmd_ui_switch)
+    ud = sub.add_parser("ui-send"); ud.add_argument("--file", required=True); ud.add_argument("--session-id", required=True); ud.add_argument("--expect-tab", required=True); ud.add_argument("--window-id", type=int)
+    ud.add_argument("--lock-timeout", type=float, default=10)
     ud.set_defaults(fn=cmd_ui_send)
     n = sub.add_parser("send"); n.add_argument("key", nargs="?"); n.add_argument("--file", required=True)
     n.add_argument("--new", action="store_true"); n.add_argument("--cwd")
@@ -771,7 +1095,13 @@ def main():
     if APP == "claude" and a.cmd in ("send", "ui-send", "ui-switch", "ui-tab"):
         print("Claude 会话只支持只读后端（find/locate/status/verify/wait/watch/compose）；前端写入只面向 Codex。", file=sys.stderr)
         sys.exit(2)
-    sys.exit(a.fn(a))
+    try:
+        sys.exit(a.fn(a))
+    except RuntimeError:
+        if a.cmd.startswith("ui-"):
+            print("拒绝界面操作：窗口归属或界面状态无法确认", file=sys.stderr)
+            sys.exit(2)
+        raise
 
 
 if __name__ == "__main__":

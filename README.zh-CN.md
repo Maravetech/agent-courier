@@ -17,13 +17,13 @@
 | 通道 | 工具 | 能投到哪里 | 截图 |
 | --- | --- | --- | --- |
 | 前端主通道 | Claude Computer use（后台 `app_*` 工具） | Codex App 里的任意会话，包括新建会话 | 写入或点击前截一张 0.1 倍的小图 |
-| 前端备用通道 | [cua-driver](https://github.com/trycua/cua) 的辅助功能调用（`ui-*` 命令） | 同上 | 不截图 |
+| 前端备用通道 | Swift 原生 macOS AX 控件操作，配合 [cua-driver](https://github.com/trycua/cua) 获取屏上窗口边界（`ui-*` 命令） | 同上 | 不截图 |
 | 命令行兜底 | `codex exec` | 新建会话，以及 App 从没加载过的会话 | 不截图 |
 
 ## 安全设计
 
 - 不覆盖草稿：输入框里只要不是占位文字，就停下来问你。
-- cua-driver 备用通道要求完整会话 ID 和精确标签标题，点击发送前再核对标签与草稿；没有身份抬头的消息直接拒发。
+- 原生 AX 备用通道要求完整会话 ID 和精确标签标题，点击发送前再核对标签与草稿；没有身份抬头的消息直接拒发。
 - 只在后台操作：不接管全屏、不碰剪贴板、不点链接。
 - 碰到资金、凭据、改规则、不可逆操作，或者迟迟没有进展，就停下来交还给你。
 
@@ -67,20 +67,32 @@ python3 -I $C wait <ID> --text "<唯一投递片段>"
 python3 -I $C watch <ID>             # 持续输出开工、完成、中止、等待确认
 ```
 
-`ui-send` 只用于索引中已有的会话；新建会话用 Computer use 或 `send --new`。`wait` 以匹配到的投递消息为锚，即使回合已结束也能返回；中止或抬头不符会返回非零。离线测试不代表真实 Codex 界面已经送达。
+`ui-send` 只用于索引中已有的会话；新建会话用 Computer use 或 `send --new`。`find`、`status`、`verify`、`wait`、`watch` 按会话 ID 汇总所有 rollout 分段，按事件时间读取，包含文件名带 `_分段ID` 后缀的记录。`wait` 以匹配到的投递消息为锚，即使回合已结束也能返回；中止或抬头不符会返回非零。离线测试不代表真实 Codex 界面已经送达。
+
+`ui-send` 写入后若未能点发送，只在原窗口、原标签页和输入框仍是本次写入全文时清空并报告「已还原」。若标签或内容变化，报告「未还原」，必须先在 App 核对再重试；不会清掉别人的新草稿。发送按钮与当前标签页都从绑定的原生 AX 窗口核对。
+
+`verify` 默认最多轮询 30 秒，因为发送返回后会话记录可能延迟写入。只查一次时传 `--timeout 0`。
+
+`send --new` 不会设置 Codex App 会话标题，也不能保证侧栏标题有编号。本机 `codex-cli 0.160.0` 的 `codex exec` 没有标题参数，CLI 也没有改名命令；新会话需通过受支持的 App 会话工具或 App 界面改名，再读回核对编号。不要直接修改 `~/.codex/session_index.jsonl`。首条 `Codex·新建` 投递在 App 自动生成标题后仍可用 `wait` 核验。
+
+**原生 AX 窗口绑定：**`ui-*` 按 bundle ID 找 Codex 进程，读取该 App 自己的 `AXWindows`，用位置和尺寸与选定的屏上 CuaDriver 窗口唯一匹配。标签、侧栏按钮、输入框、发送按钮及还原都限制在该窗口内；窗口或控件不唯一就拒绝。多个屏上窗口时传 `--window-id <ID>`。旧 CuaDriver 快照虽然会出现重复的 `AXWindow` 根节点，现版 `ui-*` 不再用其树。
+
+2026-11-05 已在隔离测试会话实发单行、多行，各自通过 `verify`、`wait`，前台 App 保持不变。空输入框的 AXValue 占位提示带一个换行；失败还原时写入空字符串，再核对发送按钮消失，不能把占位提示当成草稿写回。
+
+`ui-tab`、`ui-switch`、`ui-send` 共用 `$COURIER_STATE_DIR` 下的跨进程 Codex 界面锁，避免多个进程同时操作同一个 Codex 窗口。锁记录持有者 PID 与命令，进程退出即释放；默认 10 秒超时，可用 `--lock-timeout <秒>` 调整。只有使用同一状态目录的本版 courier 进程会遵守该锁；直接调用 cua-driver 或仍用旧插件的 Agent 不受约束。发送前还会核对抬头收件编号与当前标签页编号。
 
 ## 环境要求
 
-macOS、Codex 桌面 App、Python 3.8 及以上（只用标准库）。可选：带 Computer use 的 Claude 桌面 App、cua-driver、Codex 命令行。实测过的版本见 [PREREQUISITES.md](skills/courier/PREREQUISITES.md)。
+macOS、Codex 桌面 App、Python 3.8 及以上（只用标准库）；备用 `ui-*` 通道还需要 Swift 命令行工具和 cua-driver。可选：带 Computer use 的 Claude 桌面 App、Codex 命令行。实测过的版本见 [PREREQUISITES.md](skills/courier/PREREQUISITES.md)。
 
 ## 配置
 
 | 变量 | 默认值 | 含义 |
 | --- | --- | --- |
 | `CODEX_HOME` | `~/.codex` | Codex 会话记录所在目录 |
-| `COURIER_STATE_DIR` | `~/.local/state/courier` | 命令行通道的日志目录 |
+| `COURIER_STATE_DIR` | `~/.local/state/courier` | 命令行通道日志与 Codex 界面写锁目录 |
 | `COURIER_AGENTS` | 任意合规名称 | 发送方白名单，逗号分隔 |
-| `COURIER_SEND_LABELS` | `发送,Send,送信,Senden,Envoyer,Enviar` | cua-driver 通道识别「发送」按钮用的文字 |
+| `COURIER_SEND_LABELS` | `发送,Send,送信,Senden,Envoyer,Enviar` | 原生 AX 通道识别「发送」按钮用的文字 |
 
 ## 开发
 

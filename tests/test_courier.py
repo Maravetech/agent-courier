@@ -2,11 +2,14 @@
 import json
 import os
 import subprocess
+import time
 import sys
 import tempfile
 import unittest
 import importlib.util
 import glob
+import io
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -33,6 +36,10 @@ class CourierTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         home = self.tmp.name
+        self.old_logdir = courier.LOGDIR
+        courier.LOGDIR = os.path.join(home, 'state')
+        self.old_native_ax = courier.USE_NATIVE_AX
+        courier.USE_NATIVE_AX = False  # legacy fixture cases still exercise their parsing helpers
         day = os.path.join(home, "sessions", "2026", "01", "02")
         os.makedirs(day)
         os.makedirs(os.path.join(home, "archived_sessions"))
@@ -55,6 +62,8 @@ class CourierTest(unittest.TestCase):
         self.env.pop("COURIER_AGENTS", None)
 
     def tearDown(self):
+        courier.LOGDIR = self.old_logdir
+        courier.USE_NATIVE_AX = self.old_native_ax
         self.tmp.cleanup()
 
     def run_cli(self, *args, env=None):
@@ -81,10 +90,26 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("空闲", out)
 
+    def test_status_zero_messages_hides_message_bodies(self):
+        code, out = self.run_cli('status', TID, '-n', '0')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('marker-42', out)
+        self.assertNotIn('--- 2026-', out)
+
     def test_verify(self):
         self.assertEqual(self.run_cli("verify", TID, "--text", "marker-42")[0], 0)
-        self.assertEqual(self.run_cli("verify", TID, "--text", "marker-42", "--since", "2026-01-03T00:00:00Z")[0], 1)
-        self.assertEqual(self.run_cli("verify", TID, "--text", "ignored")[0], 1)  # environment context is not a user message
+        self.assertEqual(self.run_cli("verify", TID, "--text", "marker-42", "--since", "2026-01-03T00:00:00Z", "--timeout", "0")[0], 1)
+        self.assertEqual(self.run_cli("verify", TID, "--text", "ignored", "--timeout", "0")[0], 1)  # environment context is not a user message
+
+    def test_verify_polls_until_delayed_delivery_appears(self):
+        proc = subprocess.Popen([sys.executable, '-I', SCRIPT, 'verify', TID, '--text', 'delayed-marker', '--timeout', '2', '--interval', '0.05'],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self.env)
+        time.sleep(0.2)
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(msg('2026-01-02T00:00:04.000Z', 'user', 'delayed-marker') + '\n')
+        out, err = proc.communicate(timeout=3)
+        self.assertEqual(proc.returncode, 0, out + err)
 
     def test_wait_and_reply_header(self):
         code, out = self.run_cli("wait", TID, "--text", "marker-42", "--timeout", "2")
@@ -123,6 +148,26 @@ class CourierTest(unittest.TestCase):
         code, out = self.run_cli("wait", TID, "--text", "marker-42", "--timeout", "1")
         self.assertNotEqual(code, 0, out)
 
+    def test_wait_rejects_interleaved_user_message(self):
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        original = Path(path).read_text(encoding='utf-8')
+        extra = msg('2026-01-02T00:00:01.750Z', 'user', 'another user request') + '\n'
+        marker = msg('2026-01-02T00:00:02.000Z', 'assistant', '【回复】Codex·00159 → Claude Code·0007\n收到')
+        Path(path).write_text(original.replace(marker, extra + marker), encoding='utf-8')
+        code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '1')
+        self.assertEqual(code, 1, out)
+        self.assertIn('其他用户消息', out)
+
+    def test_wait_accepts_initial_cli_new_delivery_after_auto_title(self):
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        raw = Path(path).read_text(encoding='utf-8').replace('Codex·00159', 'Codex·新建')
+        Path(path).write_text(raw, encoding='utf-8')
+        index = os.path.join(self.tmp.name, 'session_index.jsonl')
+        with open(index, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'id': TID, 'thread_name': 'auto generated title'}) + '\n')
+        code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '1')
+        self.assertEqual(code, 0, out)
+
     def test_watch_emits_only_status_transitions(self):
         path = glob.glob(os.path.join(self.tmp.name, "sessions", "*", "*", "*", "rollout-*.jsonl"))[0]
         with open(path, "a", encoding="utf-8") as f:
@@ -138,6 +183,45 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn(TID2, out)
         self.assertEqual(self.run_cli("status", TID2)[0], 0)
+
+    def segmented_rollout(self):
+        segment_id = '01aaaaaa-0000-7000-8000-000000000099'
+        path = os.path.join(self.tmp.name, 'sessions', '2026', '01', '02',
+                            f'rollout-2026-01-02T00-10-00-{TID}_{segment_id}.jsonl')
+        header = '【投递】Claude Code·0007 → Codex·00159'
+        rows = [
+            line('2026-01-02T00:10:00.000Z', 'event_msg', {'type': 'task_started'}),
+            msg('2026-01-02T00:10:01.000Z', 'user', header + '\n\nsegment-marker-93 marker-42'),
+            msg('2026-01-02T00:10:02.000Z', 'assistant', '【回复】Codex·00159 → Claude Code·0007\nsegment-done'),
+            line('2026-01-02T00:10:03.000Z', 'event_msg', {'type': 'task_complete'}),
+        ]
+        Path(path).write_text('\n'.join(rows) + '\n', encoding='utf-8')
+        return path
+
+    def test_segmented_find_and_status_use_latest_segment(self):
+        new_path = self.segmented_rollout()
+        code, found = self.run_cli('find', TID)
+        self.assertEqual(code, 0, found)
+        self.assertIn(new_path, found)
+        code, status = self.run_cli('status', TID, '-n', '1')
+        self.assertEqual(code, 0, status)
+        self.assertIn('2026-01-02T00:10:03.000Z', status)
+        self.assertIn('segment-done', status)
+
+    def test_segmented_verify_and_wait_find_delivery_after_abort(self):
+        self.segmented_rollout()
+        code, verified = self.run_cli('verify', TID, '--text', 'segment-marker-93', '--timeout', '0')
+        self.assertEqual(code, 0, verified)
+        code, waited = self.run_cli('wait', TID, '--text', 'segment-marker-93', '--timeout', '0')
+        self.assertEqual(code, 0, waited)
+        self.assertIn('回复抬头：✅', waited)
+        self.assertIn('segment-done', waited)
+
+    def test_segmented_locate_returns_one_session(self):
+        self.segmented_rollout()
+        code, located = self.run_cli('locate', '--text', 'marker-42', '--hours', '1000000')
+        self.assertEqual(code, 0, located)
+        self.assertEqual(len(located.strip().splitlines()), 1)
 
     def test_compose(self):
         body = self.write("b.txt", "do the thing")
@@ -166,6 +250,16 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(self.run_cli("send", "--new", "--file", body)[0], 2)
         self.assertEqual(self.run_cli("ui-send", "--file", body, "--expect-tab", "00159")[0], 2)
 
+    def test_send_rejects_wrong_recipient_and_malformed_target(self):
+        self.assertIsNone(courier.parse_header('【投递】Claude Code·0007 → Codex·foobar\nhello'))
+        self.assertIsNone(courier.parse_header('【投递】Claude Code·0007 → Hermes·00159\nhello'))
+        with patch.object(courier, 'AGENTS', ('Claude Code', 'Codex')):
+            self.assertIsNone(courier.parse_header('【投递】Unknown Sender·0007 → Codex·00159\nhello'))
+        wrong = self.write('wrong.txt', '【投递】Claude Code·0007 → Codex·00160\n\nhello')
+        self.assertEqual(self.run_cli('send', TID, '--file', wrong)[0], 2)
+        not_new = self.write('not-new.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        self.assertEqual(self.run_cli('send', '--new', '--file', not_new)[0], 2)
+
 
     def test_ui_send_requires_exact_target_and_rechecks_before_click(self):
         body = self.write("delivery.txt", "【投递】Claude Code·0007 → Codex·00159\n\nhello")
@@ -184,6 +278,81 @@ class CourierTest(unittest.TestCase):
             self.assertEqual(courier.cmd_ui_send(args), 2)
         self.assertNotIn("click", calls)
 
+    def test_ui_send_rechecks_target_immediately_before_write(self):
+        body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
+        calls = []
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', side_effect=[args.expect_tab, '00160 archived one']), \
+             patch.object(courier, 'cua_textarea', return_value=(3, 'Message', '')), patch.object(courier, 'cua_tree', return_value=''), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier, 'cua', side_effect=lambda tool, data: calls.append((tool, data)) or '{}'):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+        self.assertFalse(any(tool == 'set_value' for tool, _ in calls))
+
+    def test_ui_send_missing_button_restores_empty_draft(self):
+        body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        value = Path(body).read_text(encoding='utf-8')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
+        calls, output = [], io.StringIO()
+        textareas = [(3, 'Message', ''), (3, 'Message', value), (3, 'Message', value), (3, 'Message', '')]
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', return_value=args.expect_tab), \
+             patch.object(courier, 'cua_textarea', side_effect=textareas), patch.object(courier, 'cua_tree', side_effect=lambda _p, _w, q: '[8] AXRadioButton "00159 test target"' if q == '' else ''), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier, 'cua', side_effect=lambda tool, data: calls.append((tool, data)) or '{}'), \
+             patch.object(courier.time, 'sleep'), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_send(args), 1)
+        self.assertEqual([data['value'] for tool, data in calls if tool == 'set_value'], [value, ''])
+        self.assertNotIn('click', [tool for tool, _ in calls])
+        self.assertIn('已还原', output.getvalue())
+
+    def test_ui_send_button_comes_from_same_window_and_tab_snapshot(self):
+        body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        value = Path(body).read_text(encoding='utf-8')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID, window_id=1)
+        calls = []
+        def tree(_pid, wid, query):
+            calls.append(('snapshot', {'window_id': wid, 'query': query}))
+            return '[8] AXRadioButton "00159 test target"\n[9] AXButton "发送"' if query == '' else ''
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', return_value=args.expect_tab), \
+             patch.object(courier, 'cua_textarea', side_effect=[(3, 'Message', ''), (3, 'Message', value)]), \
+             patch.object(courier, 'cua_tree', side_effect=tree), patch.object(courier, 'cua_front', return_value=[]), \
+             patch.object(courier, 'cua', side_effect=lambda tool, data: calls.append((tool, data)) or '{}'), patch.object(courier.time, 'sleep'):
+            self.assertEqual(courier.cmd_ui_send(args), 0)
+        self.assertEqual(calls[-2], ('snapshot', {'window_id': 1, 'query': ''}))
+        self.assertEqual(calls[-1], ('click', {'pid': 42, 'window_id': 1, 'element_index': 9}))
+
+    def test_ui_send_ignores_button_text_inside_static_content(self):
+        body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        value = Path(body).read_text(encoding='utf-8')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
+        calls, output = [], io.StringIO()
+        textareas = [(3, 'Message', ''), (3, 'Message', value), (3, 'Message', value), (3, 'Message', '')]
+        tree = '[8] AXRadioButton "00159 test target"\nAXStaticText = [9] AXButton "发送"'
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', return_value=args.expect_tab), \
+             patch.object(courier, 'cua_textarea', side_effect=textareas), patch.object(courier, 'cua_tree', side_effect=lambda _p, _w, q: tree if q == '' else ''), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier, 'cua', side_effect=lambda tool, data: calls.append((tool, data)) or '{}'), \
+             patch.object(courier.time, 'sleep'), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_send(args), 1)
+        self.assertNotIn('click', [tool for tool, _ in calls])
+        self.assertIn('已还原', output.getvalue())
+
+    def test_ui_send_does_not_clear_another_tab_after_postwrite_switch(self):
+        body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        value = Path(body).read_text(encoding='utf-8')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
+        calls, output = [], io.StringIO()
+        tabs = iter([args.expect_tab, args.expect_tab, '00160 archived one', '00160 archived one'])
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', side_effect=lambda *_: next(tabs)), \
+             patch.object(courier, 'cua_textarea', side_effect=[(3, 'Message', ''), (3, 'Message', value)]), patch.object(courier, 'cua_tree', return_value=''), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier, 'cua', side_effect=lambda tool, data: calls.append((tool, data)) or '{}'), \
+             patch.object(courier.time, 'sleep'), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+        self.assertEqual(len([tool for tool, _ in calls if tool == 'set_value']), 1)
+        self.assertIn('未还原', output.getvalue())
+
     def test_ui_send_rejects_duplicate_titles_before_accessing_ui(self):
         body = self.write("delivery.txt", "【投递】Claude Code·0007 → Codex·00159\n\nhello")
         index = os.path.join(self.tmp.name, "session_index.jsonl")
@@ -194,9 +363,303 @@ class CourierTest(unittest.TestCase):
              patch.object(courier, "cua_target", side_effect=RuntimeError("must not access UI")):
             self.assertEqual(courier.cmd_ui_send(args), 2)
 
+    def test_ui_send_rejects_header_for_another_tab_before_ui(self):
+        body = self.write('wrong-tab.txt', '【投递】Claude Code·0007 → Codex·00172\n\nhello')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', side_effect=AssertionError('UI must not be accessed')):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+
+    def test_cross_process_ui_lock_blocks_switch_and_send(self):
+        import textwrap
+        lock_file = os.path.join(self.tmp.name, 'codex-ui.lock')
+        holder = textwrap.dedent('''
+            import fcntl, json, os, sys, time
+            fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.write(fd, json.dumps({'pid': os.getpid(), 'command': 'fixture-holder', 'started_at': '2026-01-02T00:00:00Z'}).encode())
+            print('READY', flush=True)
+            time.sleep(5)
+        ''')
+        proc = subprocess.Popen([sys.executable, '-c', holder, lock_file], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(proc.stdout.readline().strip(), 'READY')
+            body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+            send_args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID, lock_timeout=0.1)
+            switch_args = SimpleNamespace(title='00159 test target', lock_timeout=0.1)
+            tab_args = SimpleNamespace(lock_timeout=0.1)
+            out = io.StringIO()
+            with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+                 patch.object(courier, 'LOGDIR', self.tmp.name), \
+                 patch.object(courier, 'cua_target', side_effect=AssertionError('UI must not be accessed')), \
+                 redirect_stdout(out):
+                self.assertEqual(courier.cmd_ui_switch(switch_args), 2)
+                self.assertEqual(courier.cmd_ui_send(send_args), 2)
+                self.assertEqual(courier.cmd_ui_tab(tab_args), 2)
+            self.assertIn('fixture-holder', out.getvalue())
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+            proc.stdout.close()
+
+    def test_ui_lock_releases_after_exception(self):
+        with patch.object(courier, 'LOGDIR', self.tmp.name):
+            with self.assertRaisesRegex(RuntimeError, 'fixture failure'):
+                with courier.ui_writer_lock(0.1, 'fixture'):
+                    raise RuntimeError('fixture failure')
+            with courier.ui_writer_lock(0.1, 'fixture-again'):
+                pass
+
+    def test_ui_lock_refuses_symlink_without_touching_target(self):
+        target = self.write('protected.txt', 'untouched')
+        os.symlink(target, os.path.join(self.tmp.name, 'codex-ui.lock'))
+        with patch.object(courier, 'LOGDIR', self.tmp.name):
+            with self.assertRaises(OSError):
+                with courier.ui_writer_lock(0.1, 'fixture'):
+                    pass
+        self.assertEqual(Path(target).read_text(encoding='utf-8'), 'untouched')
+
+    def test_ui_send_refuses_draft_without_echoing_private_text(self):
+        body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
+        out = io.StringIO()
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', return_value=args.expect_tab), \
+             patch.object(courier, 'cua_textarea', return_value=(3, 'Message', 'PRIVATE_DRAFT_MARKER')), \
+             patch.object(courier, 'cua_tree', return_value=''), patch.object(courier, 'cua_front', return_value=[]), \
+             redirect_stdout(out):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+        self.assertNotIn('PRIVATE_DRAFT_MARKER', out.getvalue())
+
+    def test_ui_switch_requires_exact_unique_index_title(self):
+        args = SimpleNamespace(title='00159 test')
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', side_effect=RuntimeError('UI must not be accessed')):
+            self.assertEqual(courier.cmd_ui_switch(args), 2)
+
+    def test_cua_target_can_select_exact_window_when_two_are_open(self):
+        apps = json.dumps({'apps': [{'pid': 42, 'bundle_id': courier.CODEX_BUNDLE, 'running': True}]})
+        wins = json.dumps({'windows': [
+            {'window_id': 111, 'is_on_screen': True, 'bounds': {'height': 500}},
+            {'window_id': 222, 'is_on_screen': True, 'bounds': {'height': 500}},
+        ]})
+        with patch.object(courier, 'cua', side_effect=[apps, wins]):
+            self.assertEqual(courier.cua_target(222), (42, 222))
+
+    def test_ui_switch_scopes_double_axwindow_and_reports_actual_tab(self):
+        args = SimpleNamespace(title='00159 test target', window_id=111)
+        clicked = []
+        def fake_cua(tool, data):
+            if tool == 'list_windows':
+                return json.dumps({'windows': [
+                    {'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}},
+                    {'window_id': 222, 'title': 'Other', 'is_on_screen': False, 'bounds': {'height': 500}},
+                ]})
+            if tool == 'get_window_state':
+                tree = ('- [0] AXWindow "Main"\n'
+                        '  - [9] AXButton "00159 test target"\n'
+                        '  - [10] AXRadioButton "00166 wrong"\n'
+                        '- [100] AXWindow "Other"\n'
+                        '  - [109] AXButton "00159 test target"\n'
+                        '  - [110] AXRadioButton "00159 test target"')
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'click':
+                clicked.append(data['element_index'])
+                return '{}'
+            raise AssertionError(tool)
+        output = io.StringIO()
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 111)), patch.object(courier, 'cua', side_effect=fake_cua), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier.time, 'sleep'), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_switch(args), 1)
+        self.assertEqual(clicked, [9])
+        self.assertIn('未切换', output.getvalue())
+        self.assertIn('00159 test target', output.getvalue())
+        self.assertIn('00166 wrong', output.getvalue())
+
+    def test_double_axwindow_tab_and_textarea_come_from_selected_subtree(self):
+        tree = ('- [0] AXWindow "Other"\n'
+                '  - [1] AXRadioButton "00166 wrong"\n'
+                '  - [2] AXTextArea "Message" = "PRIVATE_OTHER_DRAFT"\n'
+                '- [100] AXWindow "Main"\n'
+                '  - [101] AXRadioButton "00159 test target"\n'
+                '  - [102] AXTextArea "Message" = "first\\nsecond"')
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [
+                    {'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}},
+                    {'window_id': 222, 'title': 'Other', 'is_on_screen': False, 'bounds': {'height': 500}},
+                ]})
+            raise AssertionError(tool)
+        with patch.object(courier, 'cua', side_effect=fake_cua):
+            self.assertEqual(courier.cua_tab(42, 111), '00159 test target')
+            self.assertEqual(courier.cua_textarea(42, 111), (102, 'Message', 'first\nsecond'))
+
+    def test_double_axwindow_ambiguous_title_refuses(self):
+        tree = ('- [0] AXWindow "Main"\n  - [1] AXRadioButton "00159 test target"\n'
+                '  - [3] AXTextArea "Message" = ""\n'
+                '- [100] AXWindow "Main"\n  - [101] AXRadioButton "00159 test target"\n'
+                '  - [103] AXTextArea "Message" = ""')
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [{'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}}]})
+            raise AssertionError(tool)
+        with patch.object(courier, 'cua', side_effect=fake_cua):
+            with self.assertRaisesRegex(RuntimeError, 'AXWindow'):
+                courier.cua_tab(42, 111)
+
+    def test_double_axwindow_without_windowserver_owner_refuses(self):
+        tree = ('- [0] AXWindow "Main"\n  - [1] AXRadioButton "00159 test target"\n'
+                '- [100] AXWindow "Ghost"\n  - [101] AXRadioButton "00166 wrong"')
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [{'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}}]})
+            raise AssertionError(tool)
+        with patch.object(courier, 'cua', side_effect=fake_cua):
+            with self.assertRaisesRegex(RuntimeError, 'AXWindow'):
+                courier.cua_tab(42, 111)
+
+    def test_ui_switch_ambiguous_axwindow_never_clicks(self):
+        tree = ('- [0] AXWindow "Main"\n  - [9] AXButton "00159 test target"\n'
+                '- [100] AXWindow "Main"\n  - [109] AXButton "00159 test target"')
+        clicked = []
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [{'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}}]})
+            if tool == 'click':
+                clicked.append(data)
+                return '{}'
+            raise AssertionError(tool)
+        output = io.StringIO()
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 111)), patch.object(courier, 'cua', side_effect=fake_cua), \
+             patch.object(courier, 'cua_front', return_value=[]), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_switch(SimpleNamespace(title='00159 test target', window_id=111)), 2)
+        self.assertEqual(clicked, [])
+        self.assertIn('未切换', output.getvalue())
+        self.assertIn('实际标签页无法判定', output.getvalue())
+
+    def test_ui_send_ambiguous_axwindow_never_writes(self):
+        body_file = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        tree = ('- [0] AXWindow "Main"\n  - [1] AXRadioButton "00159 test target"\n'
+                '  - [3] AXTextArea "Message" = ""\n'
+                '- [100] AXWindow "Main"\n  - [101] AXRadioButton "00159 test target"\n'
+                '  - [103] AXTextArea "Message" = ""')
+        writes = []
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [{'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}}]})
+            if tool == 'set_value':
+                writes.append(data)
+                return '{}'
+            raise AssertionError(tool)
+        output = io.StringIO()
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 111)), patch.object(courier, 'cua', side_effect=fake_cua), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier.time, 'sleep'), redirect_stdout(output):
+            code = courier.cmd_ui_send(SimpleNamespace(file=body_file, expect_tab='00159 test target', session_id=TID, window_id=111))
+        self.assertEqual(code, 2)
+        self.assertEqual(writes, [])
+        self.assertIn('没有写入', output.getvalue())
+
+    def test_double_axwindow_restore_targets_selected_textarea(self):
+        body = '【投递】Claude Code·0007 → Codex·00159\n\nhello'
+        tree = ('- [0] AXWindow "Other"\n  - [2] AXRadioButton "00166 wrong"\n'
+                '  - [3] AXTextArea "Message" = "PRIVATE_OTHER_DRAFT"\n'
+                '- [100] AXWindow "Main"\n  - [101] AXRadioButton "00159 test target"\n'
+                '  - [102] AXTextArea "Message" = ' + json.dumps(body, ensure_ascii=False))
+        restored = []
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                current = tree if not restored else tree.replace(json.dumps(body, ensure_ascii=False), '""')
+                return json.dumps({'window_id': 111, 'tree_markdown': current})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [
+                    {'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}},
+                    {'window_id': 222, 'title': 'Other', 'is_on_screen': False, 'bounds': {'height': 500}},
+                ]})
+            if tool == 'set_value':
+                restored.append(data)
+                return '{}'
+            raise AssertionError(tool)
+        args = SimpleNamespace(expect_tab='00159 test target', window_id=111)
+        with patch.object(courier, 'cua', side_effect=fake_cua), patch.object(courier, 'cua_target', return_value=(42, 111)):
+            self.assertTrue(courier.restore_own_draft(args, 42, 111, 102, body, ''))
+        self.assertEqual(restored[0]['element_index'], 102)
+        self.assertEqual(restored[0]['value'], '')
+
+    def test_double_axwindow_send_uses_selected_button(self):
+        body_file = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        body = Path(body_file).read_text(encoding='utf-8')
+        args = SimpleNamespace(file=body_file, expect_tab='00159 test target', session_id=TID, window_id=111)
+        current_value, clicks = '', []
+        def fake_cua(tool, data):
+            nonlocal current_value
+            if tool == 'get_window_state':
+                tree = ('- [0] AXWindow "Other"\n'
+                        '  - [1] AXRadioButton "00159 test target"\n'
+                        '  - [9] AXButton "发送"\n'
+                        '- [100] AXWindow "Main"\n'
+                        '  - [101] AXRadioButton "00159 test target"\n'
+                        '  - [103] AXTextArea "Message" = ' + json.dumps(current_value, ensure_ascii=False) + '\n'
+                        '  - [109] AXButton "发送"')
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [
+                    {'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}},
+                    {'window_id': 222, 'title': 'Other', 'is_on_screen': False, 'bounds': {'height': 500}},
+                ]})
+            if tool == 'set_value':
+                self.assertEqual(data['element_index'], 103)
+                current_value = data['value']
+                return '{}'
+            if tool == 'click':
+                clicks.append(data['element_index'])
+                return '{}'
+            raise AssertionError(tool)
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 111)), patch.object(courier, 'cua', side_effect=fake_cua), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier.time, 'sleep'):
+            self.assertEqual(courier.cmd_ui_send(args), 0)
+        self.assertEqual(clicks, [109])
+
+    def test_same_subtree_duplicate_controls_refuse(self):
+        tree = ('- [0] AXWindow "Main"\n'
+                '  - [1] AXRadioButton "00159 test target"\n'
+                '  - [2] AXRadioButton "00166 wrong"\n'
+                '  - [3] AXTextArea "Message" = ""\n'
+                '  - [4] AXTextArea "Message" = ""')
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [{'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}}]})
+            raise AssertionError(tool)
+        with patch.object(courier, 'cua', side_effect=fake_cua):
+            with self.assertRaisesRegex(RuntimeError, '多个标签页'):
+                courier.cua_tab(42, 111)
+            with self.assertRaisesRegex(RuntimeError, '唯一输入框'):
+                courier.cua_textarea(42, 111)
+
     def test_ax_textarea_decodes_escaped_newlines_for_draft_check(self):
         with patch.object(courier, "cua_tree", return_value='[3] AXTextArea "Message" = "第一行\\n第二行"'):
             self.assertEqual(courier.cua_textarea(42, 1), (3, "Message", "第一行\n第二行"))
+
+    def test_ax_textarea_reads_full_multiline_value_without_query_filter(self):
+        def tree(_pid, _wid, query):
+            return '[3] AXTextArea "Message" = "第一行\n第二行"' if query == '' else '[3] AXTextArea "Message" = "第一行"'
+        with patch.object(courier, 'cua_tree', side_effect=tree):
+            self.assertEqual(courier.cua_textarea(42, 1), (3, 'Message', '第一行\n第二行'))
 
     def test_ci_permissions_and_action_pins(self):
         workflow = Path(os.path.join(os.path.dirname(__file__), '..', '.github', 'workflows', 'ci.yml')).read_text(encoding='utf-8')
@@ -210,6 +673,86 @@ class CourierTest(unittest.TestCase):
             self.assertIn('--session-id <ID>', doc)
             self.assertIn('wait <ID> --text', doc)
             self.assertIn('watch <ID>', doc)
+
+    def test_docs_explain_cli_new_cannot_assign_numbered_app_title(self):
+        english = Path(os.path.join(os.path.dirname(__file__), '..', 'README.md')).read_text(encoding='utf-8')
+        chinese = Path(os.path.join(os.path.dirname(__file__), '..', 'README.zh-CN.md')).read_text(encoding='utf-8')
+        self.assertIn('does not set the Codex App title', english)
+        self.assertIn('不会设置 Codex App 会话标题', chinese)
+
+    def test_native_ax_binds_visible_window_without_reading_double_cua_tree(self):
+        windows = {'windows': [
+            {'pid': 42, 'window_id': 111, 'is_on_screen': True,
+             'bounds': {'x': 10, 'y': 20, 'width': 1000, 'height': 700}},
+            {'pid': 42, 'window_id': 222, 'is_on_screen': False,
+             'bounds': {'x': 0, 'y': 0, 'width': 960, 'height': 720}}]}
+        fake = SimpleNamespace(returncode=0, stdout=json.dumps({'ok': True, 'tab': '00159 test target'}))
+        def fake_cua(tool, _args):
+            self.assertEqual(tool, 'list_windows')  # get_window_state has two AXWindow roots
+            return json.dumps(windows)
+        with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'cua', side_effect=fake_cua), \
+             patch.object(courier.subprocess if hasattr(courier, 'subprocess') else subprocess, 'run', return_value=fake) as run:
+            result = courier.native_ui_action('tab')
+        self.assertEqual(result['tab'], '00159 test target')
+        command = run.call_args.args[0]
+        self.assertIn('codex_ax.swift', command[1])
+        self.assertEqual(command[5:9], ['10', '20', '1000', '700'])
+
+    def test_native_tab_ignores_ambiguous_double_axwindow_tree(self):
+        ambiguous = ('- [0] AXWindow "Main"\n  - [1] AXRadioButton "00159 test target"\n'
+                     '- [100] AXWindow "Main"\n  - [101] AXRadioButton "00159 test target"')
+        reply = {'ok': True, 'tab': '00159 test target',
+                 'front_before': 'Claude', 'front_after': 'Claude'}
+        output = io.StringIO()
+        with patch.object(courier, 'USE_NATIVE_AX', True, create=True), \
+             patch.object(courier, 'native_ui_action', return_value=reply, create=True), \
+             patch.object(courier, 'cua_tree', return_value=ambiguous), \
+             patch.object(courier, 'cua_target', side_effect=AssertionError('legacy tree path used')), \
+             redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_tab(SimpleNamespace(window_id=111)), 0)
+        self.assertIn('00159 test target', output.getvalue())
+
+    def test_native_switch_reports_actual_tab_on_failure(self):
+        args = SimpleNamespace(title='00159 test target', window_id=None)
+        reply = {'ok': False, 'reason': '切页后核对失败', 'actual_tab': '00160 archived one'}
+        output = io.StringIO()
+        with patch.object(courier, 'USE_NATIVE_AX', True), \
+             patch.object(courier, 'CODEX', self.tmp.name), \
+             patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'native_ui_action', return_value=reply), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_switch(args), 2)
+        self.assertIn('实际标签页「00160 archived one」', output.getvalue())
+
+    def test_native_send_preserves_body_and_reports_rollback(self):
+        body = self.write('native-delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\n第一行\n第二行')
+        args = SimpleNamespace(file=body, session_id=TID, expect_tab='00159 test target', window_id=111)
+        calls = []
+        def native(action, title='', text='', window_id=None):
+            calls.append((action, title, text, window_id))
+            if action == 'tab': return {'ok': True, 'tab': args.expect_tab}
+            return {'ok': False, 'reason': '发送按钮不唯一', 'restored': True}
+        output = io.StringIO()
+        with patch.object(courier, 'USE_NATIVE_AX', True), \
+             patch.object(courier, 'CODEX', self.tmp.name), \
+             patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'native_ui_action', side_effect=native), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+        self.assertEqual(calls[1], ('send', args.expect_tab, Path(body).read_text(), 111))
+        self.assertIn('已还原', output.getvalue())
+        self.assertNotIn('第一行', output.getvalue())
+
+    def test_native_send_success_uses_same_bridge_for_tab_and_send(self):
+        body = self.write('native-success.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        args = SimpleNamespace(file=body, session_id=TID, expect_tab='00159 test target', window_id=None)
+        answers = [{'ok': True, 'tab': args.expect_tab},
+                   {'ok': True, 'tab': args.expect_tab, 'front_before': 'Claude', 'front_after': 'Claude'}]
+        with patch.object(courier, 'USE_NATIVE_AX', True), \
+             patch.object(courier, 'CODEX', self.tmp.name), \
+             patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'native_ui_action', side_effect=answers) as native:
+            self.assertEqual(courier.cmd_ui_send(args), 0)
+        self.assertEqual([call.args[0] for call in native.call_args_list], ['tab', 'send'])
 
 
 CID = "aaaaaaaa-1111-4222-8333-444444444444"
