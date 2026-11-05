@@ -29,6 +29,14 @@
 - Background only: no full-screen control, no clipboard, never clicks links.
 - Stops and hands back to you on anything about money, credentials, rule changes, irreversible actions, or no progress.
 
+## Optional bird overlay (macOS)
+
+Build with `sh overlay/build.sh`. For a stable install, set `COURIER_SIGN_IDENTITY` and run `sh overlay/build.sh --install`; the fixed path is `~/Applications/courier-overlay.app` and the bundle ID is `tech.marave.courier-overlay`. The user grants Accessibility to that App in System Settings. Without authorization, the bird stays hidden and no permission prompt appears. `overlay status` reports authorization. There is no launch agent; the process runs while a pair exists and exits 3 seconds after all pairs disappear.
+
+The transparent overlay ignores mouse events, cannot become key, and never moves the pointer. Its own AX reader locates conversation rows in the sidebar: Codex matches five-digit `AXButton` titles under `AXList`; Claude matches four-digit `AXButton` titles under `AXWebArea`, within 320 pt of the window's left edge and at most 320 pt wide. It deduplicates frames, selects a visible row, and writes each search to `$COURIER_STATE_DIR/overlay/locate.log`. Both bird and line hide whenever either row is not visible. DSH support is a later phase.
+
+For Claude Computer use, call `python3 -I skills/courier/scripts/courier.py overlay pair --from 'Claude Code·0064' --to 'Codex·00165' --state sending` immediately before sending. Codex-to-Codex pairs use the same command with `Codex·NNNNN` on both sides. The controller reads Codex rollout logs directly; `verify`, `wait`, and `watch` also report progress. `COURIER_OVERLAY=0` turns the visual off. `COURIER_OVERLAY_PROBE=<path>` writes local foreground PID and key-window samples for testing.
+
 ## Install
 
 **Claude Code** (plugin):

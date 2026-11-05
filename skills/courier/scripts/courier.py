@@ -31,6 +31,7 @@ import argparse
 import glob
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -264,19 +265,26 @@ def cmd_watch_once(a):
     """
     targets = [one(k) for k in a.keys]
     deadline = time.time() + (a.timeout if a.timeout is not None else 3600)
+    shown_working = set()
     while True:
         for d, _ in targets:
             path = rollout_path(d["id"])
             msgs, running, last_done = scan(path, a.since)
+            if running and d["id"] not in shown_working:
+                overlay_latest_turn(path, "working", since=a.since)
+                shown_working.add(d["id"])
             if last_done and last_done[0] >= a.since and not running:
                 replies = [m for m in msgs if m[1] == "assistant"]
                 tail = replies[-1][2].strip().splitlines()[0][:80] if replies else "（无回复文本）"
                 print(f"状态恢复：{d.get('thread_name')}（{d['id']}）回合结束 @ {last_done[0]}")
                 print(f"首行：{tail}")
                 print(f"下一步：python3 -I {os.path.realpath(__file__)} --app {APP} wait {d['id']} --since {a.since}")
+                overlay_watch_completion(path, since=a.since)
                 return 0
         if time.time() > deadline:
             print(f"等待超时（{a.timeout}s）：{len(targets)} 个会话都还没结束回合")
+            for _, path in targets:
+                overlay_latest_turn(path, "error", "超时", since=a.since)
             return 3
         time.sleep(a.interval)
 
@@ -343,6 +351,7 @@ def cmd_verify(a):
             for ts, role, t in msgs:
                 if role == "user" and a.text in t:
                     print(f"送达：{ts} user 消息含「{a.text}」  会话 {d['id']}")
+                    overlay_emit("delivered", t)
                     return 0
         if time.monotonic() >= deadline:
             print(f"未送达：{d['id'] if d else a.key} 在 {a.since or '全部记录'} 之后没有含「{a.text}」的用户消息")
@@ -353,6 +362,7 @@ def cmd_verify(a):
 def cmd_wait(a):
     d, _ = one(a.key)
     deadline = time.time() + a.timeout
+    working_shown = False
     while True:
         path = rollout_path(d["id"])
         anchors, replies, last_done, running = (delivery_turn(path, a.text) if a.text
@@ -360,6 +370,9 @@ def cmd_wait(a):
         if anchors > 1:
             print("投递锚点不唯一；请提供更独特的 --text", file=sys.stderr)
             return 2
+        if anchors == 1 and running and not working_shown:
+            overlay_from_log(path, "working", text=a.text)
+            working_shown = True
         if anchors == 1 and last_done:
             print(f"回合结束：{last_done[1]} @ {last_done[0]}")
             if last_done[1] == "interleaved":
@@ -367,16 +380,19 @@ def cmd_wait(a):
                 return 1
             if last_done[1] not in ("task_complete", "end_turn"):
                 print("回合中止，未取得完成回执", file=sys.stderr)
+                overlay_from_log(path, "error", "回合中止", a.text)
                 return 1
             assistants = [m for m in replies if m[1] == "assistant" and m[2].strip()]
             if not assistants:
                 print("（这一回合没有助手回复）")
+                overlay_from_log(path, "error", "无回复", a.text)
                 return 1
             ts, _, t = assistants[-1]
             # 回复抬头核对：按本轮最后一条投递的抬头推出应有的回复抬头
             sent = [m for m in replies if m[1] == "user" and parse_header(m[2])]
             if not sent:
                 print("投递抬头无效，不能核对回复身份", file=sys.stderr)
+                overlay_from_log(path, "wrong_header", text=a.text)
                 return 1
             f_tok, t_tok = parse_header(sent[0][2])
             expected_target = token(APP_TOKEN[APP], session_number(d.get("thread_name"), d["id"]))
@@ -384,6 +400,7 @@ def cmd_wait(a):
                                     and first_delivery_before_reply(path, sent[0][2]))
             if t_tok != expected_target and not new_session_delivery:
                 print(f"投递收件令牌与目标会话不符：{t_tok} != {expected_target}", file=sys.stderr)
+                overlay_from_log(path, "wrong_header", text=a.text)
                 return 1
             want = reply_line(f_tok, t_tok)
             # Markdown hard line breaks add spaces after the header. Keep every
@@ -391,12 +408,15 @@ def cmd_wait(a):
             got = t.splitlines()[0].rstrip() if t else ""
             if got != want:
                 print(f"回复抬头：❌ 缺或不符（应为「{want}」，实际「{got[:60]}」）")
+                overlay_from_log(path, "wrong_header", text=a.text)
                 return 1
             print(f"回复抬头：✅ {want}")
             print(f"--- 最终回复 {ts}\n{t}")
+            overlay_from_log(path, "replied", text=a.text)
             return 0
         if time.time() > deadline:
             print(f"等待超时（{a.timeout}s）：回合{'仍在运行' if running else '未开始'}")
+            overlay_from_log(path, "error", "超时", a.text)
             return 3
         time.sleep(a.interval)
 
@@ -524,6 +544,9 @@ def cmd_watch_stream(a):
     d, _ = one(a.keys[0])
     deadline = time.monotonic() + a.timeout if a.timeout is not None else None
     seen, current = 0, None
+    initial = True
+    if APP == "codex" and scan(path)[1]:
+        overlay_latest_turn(path, "working")
     while True:
         path = rollout_path(d["id"])
         rows = list(events(path))
@@ -534,7 +557,15 @@ def cmd_watch_stream(a):
             if status and status != current:
                 print(f"{row.get('timestamp', '')} {status}", flush=True)
                 current = status
+                if not initial and APP == "codex":
+                    if status == "开工":
+                        overlay_latest_turn(path, "working")
+                    elif status == "完成":
+                        overlay_watch_completion(path)
+                    elif status == "中止":
+                        overlay_latest_turn(path, "error", "回合中止")
         seen = len(rows)
+        initial = False
         if deadline is not None and time.monotonic() >= deadline:
             return 0
         time.sleep(max(0.1, a.interval))
@@ -598,6 +629,76 @@ def parse_header(text):
     if not match or not agent_ok(match.group(1).rsplit("·", 1)[0]):
         return None
     return match.group(1), match.group(2)
+
+
+def overlay_emit(state, body, reason=""):
+    """Best-effort visual side effect. A missing or failed overlay never changes delivery."""
+    if os.environ.get("COURIER_OVERLAY", "1") == "0":
+        return
+    parsed = parse_header(body)
+    if not parsed or not parsed[1].startswith("Codex·") or not parsed[0].startswith(("Claude Code·", "Codex·")):
+        return
+    controller = os.path.join(os.path.dirname(__file__), "overlay_controller.py")
+    try:
+        import subprocess
+        subprocess.run([sys.executable, "-I", controller, "--from-session", parsed[0],
+                        "--to-session", parsed[1], "--state", state, "--reason", reason],
+                       timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def overlay_from_log(path, state, reason="", text=None):
+    candidates = [(role, body) for _, role, body in scan(path)[0] if role == "user" and parse_header(body)]
+    if text:
+        candidates = [(role, body) for role, body in candidates if text in body]
+    if candidates:
+        overlay_emit(state, candidates[-1][1], reason)
+
+
+def overlay_latest_turn(path, state, reason="", since=None):
+    if APP != "codex":
+        return
+    messages = scan(path, since)[0]
+    users = [body for _, role, body in messages if role == "user"]
+    if users and parse_header(users[-1]):
+        overlay_emit(state, users[-1], reason)
+
+
+def overlay_watch_completion(path, since=None):
+    if APP != "codex":
+        return
+    messages = scan(path, since)[0]
+    users = [(i, body) for i, (_, role, body) in enumerate(messages) if role == "user"]
+    if not users or not parse_header(users[-1][1]):
+        return
+    start, body = users[-1]
+    replies = [text for _, role, text in messages[start + 1:] if role == "assistant"]
+    if not replies:
+        overlay_emit("error", body, "无回复")
+    elif replies[-1].splitlines()[0] == reply_line(*parse_header(body)):
+        overlay_emit("replied", body)
+    else:
+        overlay_emit("wrong_header", body)
+
+
+def cmd_overlay_pair(a):
+    if os.environ.get("COURIER_OVERLAY", "1") == "0":
+        return 0
+    sender = a.from_session if "·" in a.from_session else token("Claude Code", a.from_session)
+    recipient = a.to if "·" in a.to else token("Codex", a.to)
+    controller = os.path.join(os.path.dirname(__file__), "overlay_controller.py")
+    result = subprocess.run([sys.executable, "-I", controller, "--from-session", sender,
+                             "--to-session", recipient, "--state", a.state, "--reason", a.reason or ""],
+                            text=True, capture_output=True)
+    if result.returncode:
+        print(result.stderr.strip(), file=sys.stderr)
+    return result.returncode
+
+
+def cmd_overlay_status(a):
+    controller = os.path.join(os.path.dirname(__file__), "overlay_controller.py")
+    return subprocess.call([sys.executable, "-I", controller, "--status"])
 
 
 def has_header(text):
@@ -1305,6 +1406,7 @@ def cmd_ui_send(a):
             buttons.extend(int(x) for x in re.findall(pattern, tree))
         if len(set(buttons)) != 1:
             return fail_after_write("拒发：当前窗口和标签页中找不到唯一发送按钮", 1)
+        overlay_emit("sending", body)
         cua("click", {"pid": pid, "window_id": wid, "element_index": buttons[0]})
     except Exception:
         return fail_after_write("拒发：界面操作失败或发送结果不明，请用 verify 核对", 1)
@@ -1353,6 +1455,12 @@ def main():
     ud.add_argument("--front-timeout", type=float, default=30)
     ud.add_argument("--lock-timeout", type=float, default=10)
     ud.set_defaults(fn=cmd_ui_send)
+    overlay = sub.add_parser("overlay"); overlay_sub = overlay.add_subparsers(dest="overlay_cmd", required=True)
+    pair = overlay_sub.add_parser("pair"); pair.add_argument("--from", dest="from_session", required=True)
+    pair.add_argument("--to", required=True); pair.add_argument("--state", required=True,
+        choices=["idle", "pending", "sending", "delivered", "working", "replied", "wrong_header", "error", "stuck", "archived_source", "archived_target"])
+    pair.add_argument("--reason"); pair.set_defaults(fn=cmd_overlay_pair)
+    overlay_sub.add_parser("status").set_defaults(fn=cmd_overlay_status)
     n = sub.add_parser("send"); n.add_argument("key", nargs="?"); n.add_argument("--file", required=True)
     n.add_argument("--new", action="store_true"); n.add_argument("--cwd")
     n.add_argument("--sandbox", default="workspace-write", choices=["read-only", "workspace-write"])

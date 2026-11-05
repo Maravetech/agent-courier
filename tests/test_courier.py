@@ -10,6 +10,7 @@ import importlib.util
 import glob
 import io
 from contextlib import redirect_stdout
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,6 +19,10 @@ SCRIPT = os.path.join(os.path.dirname(__file__), "..", "skills", "courier", "scr
 spec = importlib.util.spec_from_file_location("courier_under_test", SCRIPT)
 courier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(courier)
+OVERLAY_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "skills", "courier", "scripts", "overlay_controller.py")
+overlay_spec = importlib.util.spec_from_file_location("overlay_under_test", OVERLAY_SCRIPT)
+overlay = importlib.util.module_from_spec(overlay_spec)
+overlay_spec.loader.exec_module(overlay)
 
 TID = "01aaaaaa-0000-7000-8000-000000000001"
 TID2 = "01aaaaaa-0000-7000-8000-000000000002"
@@ -60,6 +65,7 @@ class CourierTest(unittest.TestCase):
             f.write(msg("2026-01-01T00:00:00.000Z", "user", "archived marker-77") + "\n")
         self.env = dict(os.environ, CODEX_HOME=home, COURIER_STATE_DIR=os.path.join(home, "state"))
         self.env.pop("COURIER_AGENTS", None)
+        self.env["COURIER_OVERLAY"] = "0"
 
     def tearDown(self):
         courier.LOGDIR = self.old_logdir
@@ -928,6 +934,53 @@ class CourierTest(unittest.TestCase):
              patch.object(courier, 'native_ui_action', side_effect=answers) as native:
             self.assertEqual(courier.cmd_ui_send(args), 0)
         self.assertEqual([call.args[0] for call in native.call_args_list], ['tab', 'send'])
+    def test_overlay_disabled_has_no_state_or_process(self):
+        code, out = self.run_cli("overlay", "pair", "--from", "0102", "--to", TID,
+                                 "--state", "sending")
+        self.assertEqual(code, 0, out)
+        self.assertFalse(Path(self.env["COURIER_STATE_DIR"], "overlay").exists())
+
+    def test_overlay_pair_state_and_archive(self):
+        state = Path(self.tmp.name, "overlay")
+        with patch.object(overlay, "STATE_DIR", state), patch.object(overlay, "STATE_FILE", state / "pairs.json"):
+            overlay.update_pair("Claude Code·0102", "Codex·00172", "sending")
+            overlay.update_pair("Claude Code·0102", "Codex·00172", "working")
+            overlay.update_pair("Codex·00172", "Codex·00165", "sending")
+            pairs = overlay.read_pairs()
+            self.assertEqual(len(pairs), 2)
+            self.assertEqual(pairs[0]["state"], "working")
+            overlay.update_pair("Claude Code·0102", "Codex·00172", "archived_source")
+            self.assertEqual(len(overlay.read_pairs()), 1)
+            with self.assertRaises(ValueError):
+                overlay.update_pair("not-a-number", "Codex·00172", "sending")
+
+    def test_overlay_archive_uses_current_db_flag(self):
+        database = Path(self.tmp.name, "state_5.sqlite")
+        with sqlite3.connect(database) as db:
+            db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, archived INTEGER)")
+            db.execute("INSERT INTO threads VALUES (?, 0)", (TID2,))
+        with patch.dict(os.environ, {"CODEX_HOME": self.tmp.name}):
+            self.assertFalse(overlay.archived_codex("00160"))
+            with sqlite3.connect(database) as db:
+                db.execute("UPDATE threads SET archived=1 WHERE id=?", (TID2,))
+            self.assertTrue(overlay.archived_codex("00160"))
+
+    def test_watch_completion_updates_overlay_from_verified_reply(self):
+        path = glob.glob(os.path.join(self.tmp.name, "sessions", "*", "*", "*", "rollout-*.jsonl"))[0]
+        seen = []
+        with patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")), \
+             patch.object(courier, "APP", "codex"), patch.object(courier, "overlay_emit", side_effect=lambda *args: seen.append(args)):
+            args = SimpleNamespace(keys=[TID], since="2026-01-02T00:00:00Z", timeout=1, interval=0.01)
+            self.assertEqual(courier.cmd_watch_once(args), 0)
+        self.assertTrue(any(item[0] == "replied" for item in seen), seen)
+        with open(path, "r+", encoding="utf-8") as f:
+            content = f.read().replace("【回复】Codex·00159 → Claude Code·0007", "wrong header")
+            f.seek(0); f.write(content); f.truncate()
+        seen.clear()
+        with patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")), \
+             patch.object(courier, "APP", "codex"), patch.object(courier, "overlay_emit", side_effect=lambda *args: seen.append(args)):
+            self.assertEqual(courier.cmd_watch_once(args), 0)
+        self.assertTrue(any(item[0] == "wrong_header" for item in seen), seen)
 
 
 CID = "aaaaaaaa-1111-4222-8333-444444444444"
