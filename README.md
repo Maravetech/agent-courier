@@ -74,7 +74,7 @@ python3 -I $C watch <ID>             # stream start / complete / abort / waiting
 
 `send --new` does not set the Codex App title or guarantee a numbered sidebar title. The installed `codex-cli 0.160.0` has no title option on `codex exec` and no CLI rename command; use a supported App session-title tool or rename the new chat in the App, then read the title back before using its number. Do not edit `~/.codex/session_index.jsonl` to rename it. The first `Codex·新建` delivery can still be verified by `wait` after the App auto-generates a title.
 
-When Codex has multiple on-screen windows, pass `--window-id <ID>` to `ui-tab`, `ui-switch`, and `ui-send` (obtain the ID from `cua-driver call list_windows '{}'`). The helper restricts AX lookup and send checks to that window; if the same exact title still appears twice inside that window, it refuses the ambiguous click.
+When Codex has multiple on-screen windows, pass `--window-id <ID>` to `ui-tab`, `ui-switch`, and `ui-send` (obtain the ID from `cua-driver call list_windows '{}'`). The helper splits the AX snapshot at each top-level `AXWindow` and uses only the subtree whose title uniquely matches the selected on-screen window. It refuses the operation if the mapping or a control within that subtree is ambiguous. Some Codex/CuaDriver combinations duplicate the same `AXWindow` title in one snapshot; in that case the cua-driver channel cannot safely send until the UI tree becomes unambiguous.
 
 ## Requirements
 

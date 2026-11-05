@@ -669,7 +669,49 @@ def cua_target(window_id=None):
 
 
 def cua_tree(pid, wid, query):
-    return json.loads(cua("get_window_state", {"pid": pid, "window_id": wid, "capture_mode": "ax", "query": query}))["tree_markdown"]
+    """Return only the AXWindow proved to belong to ``wid``.
+
+    CuaDriver may render several top-level AXWindows in a single requested
+    window snapshot. Its element indices still refer to that entire snapshot,
+    so retain the original indices while discarding every other subtree.
+    """
+    import re
+    state = json.loads(cua("get_window_state", {"pid": pid, "window_id": wid,
+                                               "capture_mode": "ax", "query": ""}))
+    if state.get("window_id") != wid:
+        raise RuntimeError("AX 快照的窗口 ID 与请求不符")
+    lines = state["tree_markdown"].splitlines(keepends=True)
+    roots = []
+    for pos, line in enumerate(lines):
+        match = re.match(r'^- \[\d+\] AXWindow "((?:[^"\\]|\\.)*)"', line)
+        if match:
+            try:
+                title = json.loads('"' + match.group(1) + '"')
+            except ValueError:
+                raise RuntimeError("AXWindow 标题无法解析") from None
+            roots.append((pos, title))
+    if not roots:
+        raise RuntimeError("AX 快照中找不到可归属的 AXWindow")
+    wins = json.loads(cua("list_windows", {"pid": pid}))["windows"]
+    chosen = [w for w in wins if w.get("window_id") == wid and w.get("is_on_screen")
+              and w.get("bounds", {}).get("height", 0) > 200]
+    if len(chosen) != 1 or not chosen[0].get("title"):
+        raise RuntimeError("无法确认指定 AXWindow 在屏上及其标题")
+    if len(roots) > 1:
+        # An AX root without a unique WindowServer counterpart may be a stale
+        # or duplicated representation. Never infer its owner from ordering.
+        for _, title in roots:
+            owners = [w for w in wins if title and w.get("title") == title
+                      and w.get("bounds", {}).get("height", 0) > 200]
+            if len(owners) != 1:
+                raise RuntimeError("AXWindow 无法逐一对应真实窗口；拒绝操作")
+    matches = [i for i, (_, title) in enumerate(roots) if title == chosen[0]["title"]]
+    if len(matches) != 1:
+        raise RuntimeError("AXWindow 与指定窗口无法唯一对应；拒绝操作")
+    i = matches[0]
+    start = roots[i][0]
+    end = roots[i + 1][0] if i + 1 < len(roots) else len(lines)
+    return "".join(lines[start:end])
 
 
 def cua_front():
@@ -683,16 +725,20 @@ def cua_tab(pid, wid):
 
 def tab_from_tree(tree):
     import re
-    m = re.findall(r'AXRadioButton "([^"]+)"', tree)
-    return m[0] if m else None
+    tabs = re.findall(r'(?m)^[ \t]*(?:[-*][ \t]+)?\[\d+\][ \t]+AXRadioButton[ \t]+"([^"]+)"', tree)
+    if len(tabs) > 1:
+        raise RuntimeError("当前 AXWindow 内有多个标签页候选；拒绝猜测")
+    return tabs[0] if tabs else None
 
 
 def cua_textarea(pid, wid):
     """返回 (index, 占位文字, 当前值)。读取未过滤树，保留多行 AXValue。"""
     import re
-    m = re.search(r'\[(\d+)\] AXTextArea "([^"]*)"(?: = "((?:[^"\\]|\\.)*))?', cua_tree(pid, wid, ""))
-    if not m:
-        raise RuntimeError("找不到输入框")
+    pattern = r'(?m)^[ \t]*(?:[-*][ \t]+)?\[(\d+)\][ \t]+AXTextArea[ \t]+"([^"]*)"(?: = "((?:[^"\\]|\\.)*))?'
+    matches = list(re.finditer(pattern, cua_tree(pid, wid, "")))
+    if len(matches) != 1:
+        raise RuntimeError("当前 AXWindow 中找不到唯一输入框")
+    m = matches[0]
     value = m.group(3) or ""
     try:
         value = json.loads('"' + value + '"')
@@ -716,7 +762,12 @@ def cmd_ui_switch(a):
         return 2
     pid, wid = cua_target(getattr(a, "window_id", None))
     before = cua_front()
-    hits = re.findall(r'\[(\d+)\] AXButton "([^"]+)"', cua_tree(pid, wid, a.title))
+    try:
+        tree = cua_tree(pid, wid, a.title)
+    except RuntimeError:
+        print(f"未切换：目标「{a.title}」，实际标签页无法判定（窗口归属不明）")
+        return 2
+    hits = re.findall(r'(?m)^[ \t]*(?:[-*][ \t]+)?\[(\d+)\][ \t]+AXButton[ \t]+"([^"]+)"', tree)
     hits = [(i, t) for i, t in hits if a.title == t]
     if not hits:
         print(f"左侧列表里没找到「{a.title}」")
@@ -724,11 +775,19 @@ def cmd_ui_switch(a):
     if len(hits) != 1:
         print(f"左侧列表有 {len(hits)} 个标题匹配；请给唯一完整标题")
         return 2
-    cua("click", {"pid": pid, "window_id": wid, "element_index": int(hits[0][0])})
-    time.sleep(1.5)
-    tab = cua_tab(pid, wid)
-    print(f"已切换：标签页「{tab}」  前台 {before} → {cua_front()}")
-    return 0 if tab == a.title and before == cua_front() else 1
+    try:
+        cua("click", {"pid": pid, "window_id": wid, "element_index": int(hits[0][0])})
+        time.sleep(1.5)
+        tab = cua_tab(pid, wid)
+    except RuntimeError:
+        print(f"未切换：目标「{a.title}」，实际标签页无法判定（点击或读回失败）")
+        return 1
+    after = cua_front()
+    if tab != a.title or before != after:
+        print(f"未切换：目标「{a.title}」，实际标签页「{tab}」  前台 {before} → {after}")
+        return 1
+    print(f"已切换：标签页「{tab}」  前台 {before} → {after}")
+    return 0
 
 
 def restore_own_draft(a, pid, wid, index, body, prior_value):
@@ -772,21 +831,33 @@ def cmd_ui_send(a):
     if not parsed or parsed[1] != token("Codex", session_number(d.get("thread_name"), d["id"])):
         print("拒发：正文收件令牌与目标会话不符", file=sys.stderr)
         return 2
-    pid, wid = cua_target(getattr(a, "window_id", None))
-    tab = cua_tab(pid, wid)
+    try:
+        pid, wid = cua_target(getattr(a, "window_id", None))
+        tab = cua_tab(pid, wid)
+    except RuntimeError:
+        print("拒发：窗口归属或标签页无法确认；没有写入")
+        return 2
     if tab != a.expect_tab:
         print(f"拒发：当前标签页是「{tab}」，不是「{a.expect_tab}」。先 ui-switch。")
         return 2
     before = cua_front()
-    for lab in STOP_LABELS:  # 界面有「停止」按钮 = 目标会话正在跑回合：不写入、不插话
-        if re.search(r'\] AXButton "' + re.escape(lab) + '"', cua_tree(pid, wid, lab)):
-            print(f"拒发：目标会话正在运行回合（界面有「{lab}」按钮）。先 watch 等它状态恢复。")
-            return 2
-    idx, placeholder, value = cua_textarea(pid, wid)
+    try:
+        for lab in STOP_LABELS:  # 界面有「停止」按钮 = 目标会话正在跑回合：不写入、不插话
+            if re.search(r'\] AXButton "' + re.escape(lab) + '"', cua_tree(pid, wid, lab)):
+                print(f"拒发：目标会话正在运行回合（界面有「{lab}」按钮）。先 watch 等它状态恢复。")
+                return 2
+        idx, placeholder, value = cua_textarea(pid, wid)
+    except RuntimeError:
+        print("拒发：目标窗口或输入框无法唯一确认；没有写入")
+        return 2
     if value.strip() and value.strip() != placeholder.strip():
         print("拒发：输入框里有草稿，不覆盖，也不打印草稿内容。")
         return 2
-    if cua_target(getattr(a, "window_id", None)) != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
+    try:
+        still_target = cua_target(getattr(a, "window_id", None)) == (pid, wid) and cua_tab(pid, wid) == a.expect_tab
+    except RuntimeError:
+        still_target = False
+    if not still_target:
         print("拒发：写入前目标窗口或标签页已变化；没有写入")
         return 2
     prior_value = "" if value.strip() == placeholder.strip() else value
@@ -872,7 +943,13 @@ def main():
     if APP == "claude" and a.cmd in ("send", "ui-send", "ui-switch", "ui-tab"):
         print("Claude 会话只支持只读后端（find/locate/status/verify/wait/watch/compose）；前端写入只面向 Codex。", file=sys.stderr)
         sys.exit(2)
-    sys.exit(a.fn(a))
+    try:
+        sys.exit(a.fn(a))
+    except RuntimeError:
+        if a.cmd.startswith("ui-"):
+            print("拒绝界面操作：窗口归属或界面状态无法确认", file=sys.stderr)
+            sys.exit(2)
+        raise
 
 
 if __name__ == "__main__":

@@ -90,7 +90,7 @@ Why the CLI can't be primary: while the Codex app runs, it holds the write lock 
 
 ### Front end with cua-driver (fallback, no screenshots)
 
-`ui-switch "<exact title>"` → `ui-send --file body.txt --session-id <ID> --expect-tab "<exact title>"`. This helper only addresses existing indexed sessions. It writes with `set_value`, checks the exact tab and draft again, then presses Send by accessibility action. If the target changes or the text differs, it leaves the draft in place and refuses to click. Never AXPress the input box itself: that once raised Codex to the front. Buttons don't.
+`ui-switch "<exact title>"` → `ui-send --file body.txt --session-id <ID> --expect-tab "<exact title>"`. This helper only addresses existing indexed sessions. It selects one uniquely identified `AXWindow` subtree, writes with `set_value`, checks the exact tab and draft again, then presses Send by accessibility action. If the window cannot be uniquely identified, it refuses before writing. If the target changes or the text differs after writing, it only restores a draft that still belongs to this attempt. Never AXPress the input box itself: that once raised Codex to the front. Buttons don't.
 
 On a pre-click failure after its own write, `ui-send` restores the prior empty composer only while the same window, tab, and exact text remain. `已还原` confirms the read-back; `未还原` means the target or draft changed, so inspect the App before retrying. It does not clear a different tab or a draft changed by someone else.
 

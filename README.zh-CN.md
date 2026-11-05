@@ -75,7 +75,7 @@ python3 -I $C watch <ID>             # 持续输出开工、完成、中止、�
 
 `send --new` 不会设置 Codex App 会话标题，也不能保证侧栏标题有编号。本机 `codex-cli 0.160.0` 的 `codex exec` 没有标题参数，CLI 也没有改名命令；新会话需通过受支持的 App 会话工具或 App 界面改名，再读回核对编号。不要直接修改 `~/.codex/session_index.jsonl`。首条 `Codex·新建` 投递在 App 自动生成标题后仍可用 `wait` 核验。
 
-Codex 同时开多个屏上窗口时，先用 `cua-driver call list_windows '{}'` 取得目标窗口 ID，再给 `ui-tab`、`ui-switch`、`ui-send` 传 `--window-id <ID>`。无障碍查找和发送复核只针对该窗口；若选定窗口内仍有两个完全同名按钮，工具会拒绝不确定的点击。
+Codex 同时开多个屏上窗口时，先用 `cua-driver call list_windows '{}'` 取得目标窗口 ID，再给 `ui-tab`、`ui-switch`、`ui-send` 传 `--window-id <ID>`。工具按顶层 `AXWindow` 切分无障碍快照，只使用标题与所选屏上窗口唯一对应的子树；子树归属或其中的控件仍有歧义时拒绝操作。某些 Codex/CuaDriver 组合会在同一快照中重复同名 `AXWindow`，此时该通道无法安全投递，须等无障碍树恢复可唯一归属。
 
 ## 环境要求
 

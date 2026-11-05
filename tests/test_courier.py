@@ -252,7 +252,7 @@ class CourierTest(unittest.TestCase):
         textareas = [(3, 'Message', ''), (3, 'Message', value), (3, 'Message', value), (3, 'Message', '')]
         with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
              patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', return_value=args.expect_tab), \
-             patch.object(courier, 'cua_textarea', side_effect=textareas), patch.object(courier, 'cua_tree', side_effect=lambda _p, _w, q: 'AXRadioButton "00159 test target"' if q == '' else ''), \
+             patch.object(courier, 'cua_textarea', side_effect=textareas), patch.object(courier, 'cua_tree', side_effect=lambda _p, _w, q: '[8] AXRadioButton "00159 test target"' if q == '' else ''), \
              patch.object(courier, 'cua_front', return_value=[]), patch.object(courier, 'cua', side_effect=lambda tool, data: calls.append((tool, data)) or '{}'), \
              patch.object(courier.time, 'sleep'), redirect_stdout(output):
             self.assertEqual(courier.cmd_ui_send(args), 1)
@@ -267,7 +267,7 @@ class CourierTest(unittest.TestCase):
         calls = []
         def tree(_pid, wid, query):
             calls.append(('snapshot', {'window_id': wid, 'query': query}))
-            return 'AXRadioButton "00159 test target"\n[9] AXButton "发送"' if query == '' else ''
+            return '[8] AXRadioButton "00159 test target"\n[9] AXButton "发送"' if query == '' else ''
         with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
              patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', return_value=args.expect_tab), \
              patch.object(courier, 'cua_textarea', side_effect=[(3, 'Message', ''), (3, 'Message', value)]), \
@@ -283,7 +283,7 @@ class CourierTest(unittest.TestCase):
         args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID)
         calls, output = [], io.StringIO()
         textareas = [(3, 'Message', ''), (3, 'Message', value), (3, 'Message', value), (3, 'Message', '')]
-        tree = 'AXRadioButton "00159 test target"\nAXStaticText = [9] AXButton "发送"'
+        tree = '[8] AXRadioButton "00159 test target"\nAXStaticText = [9] AXButton "发送"'
         with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
              patch.object(courier, 'cua_target', return_value=(42, 1)), patch.object(courier, 'cua_tab', return_value=args.expect_tab), \
              patch.object(courier, 'cua_textarea', side_effect=textareas), patch.object(courier, 'cua_tree', side_effect=lambda _p, _w, q: tree if q == '' else ''), \
@@ -344,6 +344,211 @@ class CourierTest(unittest.TestCase):
         ]})
         with patch.object(courier, 'cua', side_effect=[apps, wins]):
             self.assertEqual(courier.cua_target(222), (42, 222))
+
+    def test_ui_switch_scopes_double_axwindow_and_reports_actual_tab(self):
+        args = SimpleNamespace(title='00159 test target', window_id=111)
+        clicked = []
+        def fake_cua(tool, data):
+            if tool == 'list_windows':
+                return json.dumps({'windows': [
+                    {'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}},
+                    {'window_id': 222, 'title': 'Other', 'is_on_screen': False, 'bounds': {'height': 500}},
+                ]})
+            if tool == 'get_window_state':
+                tree = ('- [0] AXWindow "Main"\n'
+                        '  - [9] AXButton "00159 test target"\n'
+                        '  - [10] AXRadioButton "00166 wrong"\n'
+                        '- [100] AXWindow "Other"\n'
+                        '  - [109] AXButton "00159 test target"\n'
+                        '  - [110] AXRadioButton "00159 test target"')
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'click':
+                clicked.append(data['element_index'])
+                return '{}'
+            raise AssertionError(tool)
+        output = io.StringIO()
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 111)), patch.object(courier, 'cua', side_effect=fake_cua), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier.time, 'sleep'), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_switch(args), 1)
+        self.assertEqual(clicked, [9])
+        self.assertIn('未切换', output.getvalue())
+        self.assertIn('00159 test target', output.getvalue())
+        self.assertIn('00166 wrong', output.getvalue())
+
+    def test_double_axwindow_tab_and_textarea_come_from_selected_subtree(self):
+        tree = ('- [0] AXWindow "Other"\n'
+                '  - [1] AXRadioButton "00166 wrong"\n'
+                '  - [2] AXTextArea "Message" = "PRIVATE_OTHER_DRAFT"\n'
+                '- [100] AXWindow "Main"\n'
+                '  - [101] AXRadioButton "00159 test target"\n'
+                '  - [102] AXTextArea "Message" = "first\\nsecond"')
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [
+                    {'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}},
+                    {'window_id': 222, 'title': 'Other', 'is_on_screen': False, 'bounds': {'height': 500}},
+                ]})
+            raise AssertionError(tool)
+        with patch.object(courier, 'cua', side_effect=fake_cua):
+            self.assertEqual(courier.cua_tab(42, 111), '00159 test target')
+            self.assertEqual(courier.cua_textarea(42, 111), (102, 'Message', 'first\nsecond'))
+
+    def test_double_axwindow_ambiguous_title_refuses(self):
+        tree = ('- [0] AXWindow "Main"\n  - [1] AXRadioButton "00159 test target"\n'
+                '  - [3] AXTextArea "Message" = ""\n'
+                '- [100] AXWindow "Main"\n  - [101] AXRadioButton "00159 test target"\n'
+                '  - [103] AXTextArea "Message" = ""')
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [{'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}}]})
+            raise AssertionError(tool)
+        with patch.object(courier, 'cua', side_effect=fake_cua):
+            with self.assertRaisesRegex(RuntimeError, 'AXWindow'):
+                courier.cua_tab(42, 111)
+
+    def test_double_axwindow_without_windowserver_owner_refuses(self):
+        tree = ('- [0] AXWindow "Main"\n  - [1] AXRadioButton "00159 test target"\n'
+                '- [100] AXWindow "Ghost"\n  - [101] AXRadioButton "00166 wrong"')
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [{'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}}]})
+            raise AssertionError(tool)
+        with patch.object(courier, 'cua', side_effect=fake_cua):
+            with self.assertRaisesRegex(RuntimeError, 'AXWindow'):
+                courier.cua_tab(42, 111)
+
+    def test_ui_switch_ambiguous_axwindow_never_clicks(self):
+        tree = ('- [0] AXWindow "Main"\n  - [9] AXButton "00159 test target"\n'
+                '- [100] AXWindow "Main"\n  - [109] AXButton "00159 test target"')
+        clicked = []
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [{'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}}]})
+            if tool == 'click':
+                clicked.append(data)
+                return '{}'
+            raise AssertionError(tool)
+        output = io.StringIO()
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 111)), patch.object(courier, 'cua', side_effect=fake_cua), \
+             patch.object(courier, 'cua_front', return_value=[]), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_switch(SimpleNamespace(title='00159 test target', window_id=111)), 2)
+        self.assertEqual(clicked, [])
+        self.assertIn('未切换', output.getvalue())
+        self.assertIn('实际标签页无法判定', output.getvalue())
+
+    def test_ui_send_ambiguous_axwindow_never_writes(self):
+        body_file = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        tree = ('- [0] AXWindow "Main"\n  - [1] AXRadioButton "00159 test target"\n'
+                '  - [3] AXTextArea "Message" = ""\n'
+                '- [100] AXWindow "Main"\n  - [101] AXRadioButton "00159 test target"\n'
+                '  - [103] AXTextArea "Message" = ""')
+        writes = []
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [{'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}}]})
+            if tool == 'set_value':
+                writes.append(data)
+                return '{}'
+            raise AssertionError(tool)
+        output = io.StringIO()
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 111)), patch.object(courier, 'cua', side_effect=fake_cua), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier.time, 'sleep'), redirect_stdout(output):
+            code = courier.cmd_ui_send(SimpleNamespace(file=body_file, expect_tab='00159 test target', session_id=TID, window_id=111))
+        self.assertEqual(code, 2)
+        self.assertEqual(writes, [])
+        self.assertIn('没有写入', output.getvalue())
+
+    def test_double_axwindow_restore_targets_selected_textarea(self):
+        body = '【投递】Claude Code·0007 → Codex·00159\n\nhello'
+        tree = ('- [0] AXWindow "Other"\n  - [2] AXRadioButton "00166 wrong"\n'
+                '  - [3] AXTextArea "Message" = "PRIVATE_OTHER_DRAFT"\n'
+                '- [100] AXWindow "Main"\n  - [101] AXRadioButton "00159 test target"\n'
+                '  - [102] AXTextArea "Message" = ' + json.dumps(body, ensure_ascii=False))
+        restored = []
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                current = tree if not restored else tree.replace(json.dumps(body, ensure_ascii=False), '""')
+                return json.dumps({'window_id': 111, 'tree_markdown': current})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [
+                    {'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}},
+                    {'window_id': 222, 'title': 'Other', 'is_on_screen': False, 'bounds': {'height': 500}},
+                ]})
+            if tool == 'set_value':
+                restored.append(data)
+                return '{}'
+            raise AssertionError(tool)
+        args = SimpleNamespace(expect_tab='00159 test target', window_id=111)
+        with patch.object(courier, 'cua', side_effect=fake_cua), patch.object(courier, 'cua_target', return_value=(42, 111)):
+            self.assertTrue(courier.restore_own_draft(args, 42, 111, 102, body, ''))
+        self.assertEqual(restored[0]['element_index'], 102)
+        self.assertEqual(restored[0]['value'], '')
+
+    def test_double_axwindow_send_uses_selected_button(self):
+        body_file = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        body = Path(body_file).read_text(encoding='utf-8')
+        args = SimpleNamespace(file=body_file, expect_tab='00159 test target', session_id=TID, window_id=111)
+        current_value, clicks = '', []
+        def fake_cua(tool, data):
+            nonlocal current_value
+            if tool == 'get_window_state':
+                tree = ('- [0] AXWindow "Other"\n'
+                        '  - [1] AXRadioButton "00159 test target"\n'
+                        '  - [9] AXButton "发送"\n'
+                        '- [100] AXWindow "Main"\n'
+                        '  - [101] AXRadioButton "00159 test target"\n'
+                        '  - [103] AXTextArea "Message" = ' + json.dumps(current_value, ensure_ascii=False) + '\n'
+                        '  - [109] AXButton "发送"')
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [
+                    {'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}},
+                    {'window_id': 222, 'title': 'Other', 'is_on_screen': False, 'bounds': {'height': 500}},
+                ]})
+            if tool == 'set_value':
+                self.assertEqual(data['element_index'], 103)
+                current_value = data['value']
+                return '{}'
+            if tool == 'click':
+                clicks.append(data['element_index'])
+                return '{}'
+            raise AssertionError(tool)
+        with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'cua_target', return_value=(42, 111)), patch.object(courier, 'cua', side_effect=fake_cua), \
+             patch.object(courier, 'cua_front', return_value=[]), patch.object(courier.time, 'sleep'):
+            self.assertEqual(courier.cmd_ui_send(args), 0)
+        self.assertEqual(clicks, [109])
+
+    def test_same_subtree_duplicate_controls_refuse(self):
+        tree = ('- [0] AXWindow "Main"\n'
+                '  - [1] AXRadioButton "00159 test target"\n'
+                '  - [2] AXRadioButton "00166 wrong"\n'
+                '  - [3] AXTextArea "Message" = ""\n'
+                '  - [4] AXTextArea "Message" = ""')
+        def fake_cua(tool, data):
+            if tool == 'get_window_state':
+                return json.dumps({'window_id': 111, 'tree_markdown': tree})
+            if tool == 'list_windows':
+                return json.dumps({'windows': [{'window_id': 111, 'title': 'Main', 'is_on_screen': True, 'bounds': {'height': 500}}]})
+            raise AssertionError(tool)
+        with patch.object(courier, 'cua', side_effect=fake_cua):
+            with self.assertRaisesRegex(RuntimeError, '多个标签页'):
+                courier.cua_tab(42, 111)
+            with self.assertRaisesRegex(RuntimeError, '唯一输入框'):
+                courier.cua_textarea(42, 111)
 
     def test_ax_textarea_decodes_escaped_newlines_for_draft_check(self):
         with patch.object(courier, "cua_tree", return_value='[3] AXTextArea "Message" = "第一行\\n第二行"'):
