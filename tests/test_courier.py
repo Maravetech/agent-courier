@@ -265,6 +265,12 @@ class ClaudeBackendTest(unittest.TestCase):
         with patch.object(courier, "cua_tree", return_value='[3] AXTextArea "Message" = "第一行\\n第二行"'):
             self.assertEqual(courier.cua_textarea(42, 1), (3, "Message", "第一行\n第二行"))
 
+    def test_ci_permissions_and_action_pins(self):
+        workflow = open(os.path.join(os.path.dirname(__file__), '..', '.github', 'workflows', 'ci.yml'), encoding='utf-8').read()
+        self.assertRegex(workflow, r'permissions:\s*\n\s+contents: read')
+        self.assertNotIn('actions/checkout@v4', workflow)
+        self.assertNotIn('actions/setup-python@v5', workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
