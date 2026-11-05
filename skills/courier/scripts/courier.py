@@ -827,6 +827,7 @@ def cua_textarea(pid, wid):
     return int(m.group(1)), m.group(2), value
 
 
+@ui_locked
 def cmd_ui_tab(a):
     pid, wid = cua_target(getattr(a, "window_id", None))
     print(f"当前标签页：{cua_tab(pid, wid)}  前台：{cua_front()}")
@@ -1012,7 +1013,8 @@ def main():
     c.add_argument("--file", required=True); c.add_argument("--out"); c.set_defaults(fn=cmd_compose)
     lo = sub.add_parser("locate"); lo.add_argument("--text", required=True); lo.add_argument("--since")
     lo.add_argument("--hours", type=float, default=24); lo.set_defaults(fn=cmd_locate)
-    ut = sub.add_parser("ui-tab"); ut.add_argument("--window-id", type=int); ut.set_defaults(fn=cmd_ui_tab)
+    ut = sub.add_parser("ui-tab"); ut.add_argument("--window-id", type=int)
+    ut.add_argument("--lock-timeout", type=float, default=10); ut.set_defaults(fn=cmd_ui_tab)
     us = sub.add_parser("ui-switch"); us.add_argument("title"); us.add_argument("--window-id", type=int)
     us.add_argument("--lock-timeout", type=float, default=10); us.set_defaults(fn=cmd_ui_switch)
     ud = sub.add_parser("ui-send"); ud.add_argument("--file", required=True); ud.add_argument("--session-id", required=True); ud.add_argument("--expect-tab", required=True); ud.add_argument("--window-id", type=int)

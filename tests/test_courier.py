@@ -384,6 +384,7 @@ class CourierTest(unittest.TestCase):
             body = self.write('delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
             send_args = SimpleNamespace(file=body, expect_tab='00159 test target', session_id=TID, lock_timeout=0.1)
             switch_args = SimpleNamespace(title='00159 test target', lock_timeout=0.1)
+            tab_args = SimpleNamespace(lock_timeout=0.1)
             out = io.StringIO()
             with patch.object(courier, 'CODEX', self.tmp.name), patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
                  patch.object(courier, 'LOGDIR', self.tmp.name), \
@@ -391,6 +392,7 @@ class CourierTest(unittest.TestCase):
                  redirect_stdout(out):
                 self.assertEqual(courier.cmd_ui_switch(switch_args), 2)
                 self.assertEqual(courier.cmd_ui_send(send_args), 2)
+                self.assertEqual(courier.cmd_ui_tab(tab_args), 2)
             self.assertIn('fixture-holder', out.getvalue())
         finally:
             proc.terminate()

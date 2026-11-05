@@ -67,7 +67,7 @@ python3 -I $C wait <ID> --text "<唯一投递片段>"
 python3 -I $C watch <ID>             # 持续输出开工、完成、中止、等待确认
 ```
 
-`ui-send` 只用于索引中已有的会话；新建会话用 Computer use 或 `send --new`。`wait` 以匹配到的投递消息为锚，即使回合已结束也能返回；中止或抬头不符会返回非零。离线测试不代表真实 Codex 界面已经送达。
+`ui-send` 只用于索引中已有的会话；新建会话用 Computer use 或 `send --new`。`find`、`status`、`verify`、`wait`、`watch` 按会话 ID 汇总所有 rollout 分段，按事件时间读取，包含文件名带 `_分段ID` 后缀的记录。`wait` 以匹配到的投递消息为锚，即使回合已结束也能返回；中止或抬头不符会返回非零。离线测试不代表真实 Codex 界面已经送达。
 
 `ui-send` 写入后若未能点发送，只在原窗口、原标签页和输入框仍是本次写入全文时清空并报告「已还原」。若标签或内容变化，报告「未还原」，必须先在 App 核对再重试；不会清掉别人的新草稿。发送按钮与当前标签页从同一份最后的无障碍快照核对。
 
@@ -75,7 +75,9 @@ python3 -I $C watch <ID>             # 持续输出开工、完成、中止、�
 
 `send --new` 不会设置 Codex App 会话标题，也不能保证侧栏标题有编号。本机 `codex-cli 0.160.0` 的 `codex exec` 没有标题参数，CLI 也没有改名命令；新会话需通过受支持的 App 会话工具或 App 界面改名，再读回核对编号。不要直接修改 `~/.codex/session_index.jsonl`。首条 `Codex·新建` 投递在 App 自动生成标题后仍可用 `wait` 核验。
 
-Codex 同时开多个屏上窗口时，先用 `cua-driver call list_windows '{}'` 取得目标窗口 ID，再给 `ui-tab`、`ui-switch`、`ui-send` 传 `--window-id <ID>`。工具按顶层 `AXWindow` 切分无障碍快照，只使用标题与所选屏上窗口唯一对应的子树；子树归属或其中的控件仍有歧义时拒绝操作。某些 Codex/CuaDriver 组合会在同一快照中重复同名 `AXWindow`，此时该通道无法安全投递，须等无障碍树恢复可唯一归属。
+**cua-driver 多窗口限制：**Codex 同时开多个窗口时，可用 `cua-driver call list_windows '{}'` 取得目标窗口 ID，给 `ui-tab`、`ui-switch`、`ui-send` 传 `--window-id <ID>`。工具按顶层 `AXWindow` 切分，要求每棵子树都唯一对应一个系统窗口。当前实测即使只有一个屏上窗口，快照里仍有两个完全同名的 `AXWindow`，且没有可读取的位置、尺寸、主窗口、聚焦或最小化属性；此状态下 cua-driver 备用投递通道**多窗口不可用**，会在写入前拒绝。`--window-id` 不能强行放行，也不能按出现顺序猜。
+
+`ui-tab`、`ui-switch`、`ui-send` 共用 `$COURIER_STATE_DIR` 下的跨进程 Codex 界面锁，因为只读 AX 快照也会替换驱动的元素索引表。锁记录持有者 PID 与命令，进程退出即释放；默认 10 秒超时，可用 `--lock-timeout <秒>` 调整。发送前还会核对抬头收件编号与当前标签页编号。
 
 ## 环境要求
 
@@ -86,7 +88,7 @@ macOS、Codex 桌面 App、Python 3.8 及以上（只用标准库）。可选：
 | 变量 | 默认值 | 含义 |
 | --- | --- | --- |
 | `CODEX_HOME` | `~/.codex` | Codex 会话记录所在目录 |
-| `COURIER_STATE_DIR` | `~/.local/state/courier` | 命令行通道的日志目录 |
+| `COURIER_STATE_DIR` | `~/.local/state/courier` | 命令行通道日志与 Codex 界面写锁目录 |
 | `COURIER_AGENTS` | 任意合规名称 | 发送方白名单，逗号分隔 |
 | `COURIER_SEND_LABELS` | `发送,Send,送信,Senden,Envoyer,Enviar` | cua-driver 通道识别「发送」按钮用的文字 |
 
