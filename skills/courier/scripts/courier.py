@@ -510,7 +510,25 @@ def cua_textarea(pid, wid):
     m = re.search(r'\[(\d+)\] AXTextArea "([^"]*)"(?: = "((?:[^"\\]|\\.)*))?', cua_tree(pid, wid, "AXTextArea"))
     if not m:
         raise RuntimeError("找不到输入框")
-    return int(m.group(1)), m.group(2), (m.group(3) or "")
+    value = m.group(3) or ""
+    try:
+        value = json.loads('"' + value + '"')
+    except ValueError:
+        pass
+    return int(m.group(1)), m.group(2), value
+
+
+def clean_ui_body(body):
+    """Remove the observed Markdown transport escape on every line of a delivery.
+
+    Only normalize the distinctive case where the delivery header and every
+    following line boundary carry a trailing backslash. Isolated backslashes
+    in a user's text remain intact.
+    """
+    lines = body.split("\n")
+    if len(lines) > 1 and lines[0].startswith(HEADER_PREFIX) and all(line.endswith("\\") for line in lines[:-1]):
+        return "\n".join(line[:-1] for line in lines[:-1]) + "\n" + lines[-1]
+    return body
 
 
 def cmd_ui_tab(a):
@@ -542,7 +560,7 @@ def cmd_ui_switch(a):
 def cmd_ui_send(a):
     """写输入框（set_value 整框）+ 点「发送」。输入框非空（有草稿）一律拒绝，不覆盖。"""
     import re
-    body = open(a.file, encoding="utf-8").read().rstrip()
+    body = clean_ui_body(open(a.file, encoding="utf-8").read().rstrip())
     if not has_header(body):
         print("拒发：正文第一行没有投递抬头。先用 compose 生成。", file=sys.stderr)
         return 2
