@@ -1,3 +1,5 @@
+<img src=".claude-plugin/icon.png" width="96" alt="agent-courier icon">
+
 # agent-courier
 
 [中文说明](README.zh-CN.md)
