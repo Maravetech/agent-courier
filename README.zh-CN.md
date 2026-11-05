@@ -91,6 +91,16 @@ claude plugin validate --strict .
 
 参与贡献请先读 [CONTRIBUTING.md](CONTRIBUTING.md)，并遵守 [行为准则](CODE_OF_CONDUCT.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
 
+## 状态图标
+
+每种状态一张图，各有三种背景（1024×1024 PNG），放在 [`assets/icons/`](assets/icons/)。
+
+| 状态 | 图标 | 文件 |
+| --- | --- | --- |
+| 工作中 | <img src="assets/icons/working-transparent.png" width="48" alt="工作中"> | [透明](assets/icons/working-transparent.png) · [白底](assets/icons/working-white.png) · [黑底](assets/icons/working-dark.png) |
+| 等待 | <img src="assets/icons/waiting-transparent.png" width="48" alt="等待"> | [透明](assets/icons/waiting-transparent.png) · [白底](assets/icons/waiting-white.png) · [黑底](assets/icons/waiting-dark.png) |
+| 休息／暂停 | <img src="assets/icons/resting-transparent.png" width="48" alt="休息／暂停"> | [透明](assets/icons/resting-transparent.png) · [白底](assets/icons/resting-white.png) · [黑底](assets/icons/resting-dark.png) |
+
 ## 许可证
 
 [MIT](LICENSE)

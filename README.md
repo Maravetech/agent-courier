@@ -91,6 +91,16 @@ claude plugin validate --strict .
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately as described in [SECURITY.md](SECURITY.md).
 
+## Status icons
+
+One icon per state, each in three backgrounds (1024×1024 PNG) under [`assets/icons/`](assets/icons/).
+
+| State | Icon | Files |
+| --- | --- | --- |
+| Working | <img src="assets/icons/working-transparent.png" width="48" alt="Working"> | [transparent](assets/icons/working-transparent.png) · [white](assets/icons/working-white.png) · [dark](assets/icons/working-dark.png) |
+| Waiting | <img src="assets/icons/waiting-transparent.png" width="48" alt="Waiting"> | [transparent](assets/icons/waiting-transparent.png) · [white](assets/icons/waiting-white.png) · [dark](assets/icons/waiting-dark.png) |
+| Resting / paused | <img src="assets/icons/resting-transparent.png" width="48" alt="Resting / paused"> | [transparent](assets/icons/resting-transparent.png) · [white](assets/icons/resting-white.png) · [dark](assets/icons/resting-dark.png) |
+
 ## License
 
 [MIT](LICENSE)
