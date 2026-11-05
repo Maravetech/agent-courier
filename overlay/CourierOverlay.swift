@@ -298,8 +298,9 @@ private final class OverlayApp: NSObject, NSApplicationDelegate {
             while menu.items.count > 5 { menu.removeItem(at: 2) }
             if pairs.isEmpty { menu.insertItem(NSMenuItem(title: "当前无配对", action: nil, keyEquivalent: ""), at: 2) }
             else {
+                let names = ["idle": "待命", "pending": "待确认", "sending": "投递中", "delivered": "已送达", "working": "工作中", "replied": "已回复", "error": "出错", "stuck": "卡住", "wrong_header": "回复异常", "archived_target": "返回中"]
                 for pair in pairs.reversed() {
-                    menu.insertItem(NSMenuItem(title: "\(pair.from) → \(pair.to) · \(pair.state)", action: nil, keyEquivalent: ""), at: 2)
+                    menu.insertItem(NSMenuItem(title: "\(pair.from) → \(pair.to) · \(names[pair.state] ?? pair.state)", action: nil, keyEquivalent: ""), at: 2)
                 }
             }
         }
