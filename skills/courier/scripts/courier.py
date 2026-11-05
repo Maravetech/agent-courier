@@ -423,7 +423,7 @@ def cmd_send(a):
     stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     log = os.path.join(LOGDIR, f"send-{stamp}.log")
     if a.new:
-        argv = ["codex", "exec", "-s", a.sandbox, "-"]
+        argv = ["codex", "exec", "--skip-git-repo-check", "-s", a.sandbox, "-"]
         tid = None
     else:
         if not a.key:
