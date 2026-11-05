@@ -38,6 +38,8 @@ class CourierTest(unittest.TestCase):
         home = self.tmp.name
         self.old_logdir = courier.LOGDIR
         courier.LOGDIR = os.path.join(home, 'state')
+        self.old_native_ax = courier.USE_NATIVE_AX
+        courier.USE_NATIVE_AX = False  # legacy fixture cases still exercise their parsing helpers
         day = os.path.join(home, "sessions", "2026", "01", "02")
         os.makedirs(day)
         os.makedirs(os.path.join(home, "archived_sessions"))
@@ -61,6 +63,7 @@ class CourierTest(unittest.TestCase):
 
     def tearDown(self):
         courier.LOGDIR = self.old_logdir
+        courier.USE_NATIVE_AX = self.old_native_ax
         self.tmp.cleanup()
 
     def run_cli(self, *args, env=None):
@@ -676,6 +679,80 @@ class CourierTest(unittest.TestCase):
         chinese = Path(os.path.join(os.path.dirname(__file__), '..', 'README.zh-CN.md')).read_text(encoding='utf-8')
         self.assertIn('does not set the Codex App title', english)
         self.assertIn('不会设置 Codex App 会话标题', chinese)
+
+    def test_native_ax_binds_visible_window_without_reading_double_cua_tree(self):
+        windows = {'windows': [
+            {'pid': 42, 'window_id': 111, 'is_on_screen': True,
+             'bounds': {'x': 10, 'y': 20, 'width': 1000, 'height': 700}},
+            {'pid': 42, 'window_id': 222, 'is_on_screen': False,
+             'bounds': {'x': 0, 'y': 0, 'width': 960, 'height': 720}}]}
+        fake = SimpleNamespace(returncode=0, stdout=json.dumps({'ok': True, 'tab': '00159 test target'}))
+        def fake_cua(tool, _args):
+            self.assertEqual(tool, 'list_windows')  # get_window_state has two AXWindow roots
+            return json.dumps(windows)
+        with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'cua', side_effect=fake_cua), \
+             patch.object(courier.subprocess if hasattr(courier, 'subprocess') else subprocess, 'run', return_value=fake) as run:
+            result = courier.native_ui_action('tab')
+        self.assertEqual(result['tab'], '00159 test target')
+        command = run.call_args.args[0]
+        self.assertIn('codex_ax.swift', command[1])
+        self.assertEqual(command[5:9], ['10', '20', '1000', '700'])
+
+    def test_native_tab_ignores_ambiguous_double_axwindow_tree(self):
+        ambiguous = ('- [0] AXWindow "Main"\n  - [1] AXRadioButton "00159 test target"\n'
+                     '- [100] AXWindow "Main"\n  - [101] AXRadioButton "00159 test target"')
+        reply = {'ok': True, 'tab': '00159 test target',
+                 'front_before': 'Claude', 'front_after': 'Claude'}
+        output = io.StringIO()
+        with patch.object(courier, 'USE_NATIVE_AX', True, create=True), \
+             patch.object(courier, 'native_ui_action', return_value=reply, create=True), \
+             patch.object(courier, 'cua_tree', return_value=ambiguous), \
+             patch.object(courier, 'cua_target', side_effect=AssertionError('legacy tree path used')), \
+             redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_tab(SimpleNamespace(window_id=111)), 0)
+        self.assertIn('00159 test target', output.getvalue())
+
+    def test_native_switch_reports_actual_tab_on_failure(self):
+        args = SimpleNamespace(title='00159 test target', window_id=None)
+        reply = {'ok': False, 'reason': '切页后核对失败', 'actual_tab': '00160 archived one'}
+        output = io.StringIO()
+        with patch.object(courier, 'USE_NATIVE_AX', True), \
+             patch.object(courier, 'CODEX', self.tmp.name), \
+             patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'native_ui_action', return_value=reply), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_switch(args), 2)
+        self.assertIn('实际标签页「00160 archived one」', output.getvalue())
+
+    def test_native_send_preserves_body_and_reports_rollback(self):
+        body = self.write('native-delivery.txt', '【投递】Claude Code·0007 → Codex·00159\n\n第一行\n第二行')
+        args = SimpleNamespace(file=body, session_id=TID, expect_tab='00159 test target', window_id=111)
+        calls = []
+        def native(action, title='', text='', window_id=None):
+            calls.append((action, title, text, window_id))
+            if action == 'tab': return {'ok': True, 'tab': args.expect_tab}
+            return {'ok': False, 'reason': '发送按钮不唯一', 'restored': True}
+        output = io.StringIO()
+        with patch.object(courier, 'USE_NATIVE_AX', True), \
+             patch.object(courier, 'CODEX', self.tmp.name), \
+             patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'native_ui_action', side_effect=native), redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+        self.assertEqual(calls[1], ('send', args.expect_tab, Path(body).read_text(), 111))
+        self.assertIn('已还原', output.getvalue())
+        self.assertNotIn('第一行', output.getvalue())
+
+    def test_native_send_success_uses_same_bridge_for_tab_and_send(self):
+        body = self.write('native-success.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        args = SimpleNamespace(file=body, session_id=TID, expect_tab='00159 test target', window_id=None)
+        answers = [{'ok': True, 'tab': args.expect_tab},
+                   {'ok': True, 'tab': args.expect_tab, 'front_before': 'Claude', 'front_after': 'Claude'}]
+        with patch.object(courier, 'USE_NATIVE_AX', True), \
+             patch.object(courier, 'CODEX', self.tmp.name), \
+             patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'native_ui_action', side_effect=answers) as native:
+            self.assertEqual(courier.cmd_ui_send(args), 0)
+        self.assertEqual([call.args[0] for call in native.call_args_list], ['tab', 'send'])
 
 
 CID = "aaaaaaaa-1111-4222-8333-444444444444"

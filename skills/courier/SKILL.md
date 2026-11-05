@@ -61,7 +61,7 @@ Every reply must start with the reverse:
 | Channel | When | Who can use it |
 | --- | --- | --- |
 | **Front end, primary**: Claude Computer use `mcp__computer-use__app_*` | Codex app is running; any session, including a new one | Claude sessions with Computer use on |
-| **Front end, fallback**: cua-driver (`ui-*` commands) | No Computer use, or it is unavailable | Any agent with a shell, on a Mac with cua-driver installed and authorized |
+| **Front end, fallback**: native macOS AX via Swift (`ui-*` commands), with cua-driver for window bounds | No Computer use, or it is unavailable | Any agent with a shell, on a Mac with cua-driver installed and authorized |
 | CLI, last resort: `send` | No front-end tool, or the Codex app is closed | Any agent with a shell. Only reaches new sessions and sessions the app never loaded |
 
 Why the CLI can't be primary: while the Codex app runs, it holds the write lock on **every** session it has loaded this run, not just the visible one. `send <ID>` then exits 4. Without a front-end tool, fall back to `send --new` and say in the body which session it was meant for.
@@ -88,23 +88,11 @@ Why the CLI can't be primary: while the Codex app runs, it holds the write lock 
 6. New session: click the new-chat button (found via `app_ax_find`), write, press return, then `locate --text <snippet> --since SINCE` to get the ID.
 7. If the user is working in Codex right now (Codex frontmost), ask before switching. Return the view to where the user was when done.
 
-### Front end with cua-driver (fallback, no screenshots)
+### Front end with native AX (fallback, no screenshots)
 
-`ui-switch "<exact title>"` → `ui-send --file body.txt --session-id <ID> --expect-tab "<exact title>"`. This helper only addresses existing indexed sessions. `ui-tab`, `ui-switch`, and `ui-send` share a cross-process Codex UI lock because an AX read also replaces element indices. The helper selects one uniquely identified `AXWindow` subtree. If duplicate same-title `AXWindow` roots cannot be mapped to distinct real windows, the cua-driver channel is unavailable and refuses before writing, even with `--window-id`. When the tree is unambiguous, it writes with `set_value`, checks the exact tab, recipient number, and draft again, then presses Send by accessibility action. If the target changes or the text differs after writing, it only restores a draft that still belongs to this attempt. Never AXPress the input box itself: that once raised Codex to the front. Buttons don't.
+`ui-switch "<exact title>"` → `ui-send --file body.txt --session-id <ID> --expect-tab "<exact title>"`. The helper addresses existing indexed sessions only. It gets the visible window geometry from cua-driver, then resolves the Codex process by bundle ID and matches a unique native `AXWindows` element by position and size. Every control is found inside that window. Duplicate or unmatched windows, tabs, buttons, or composer fields cause refusal. It never reads the ambiguous cua-driver AX tree and never AXPresses the input field. `ui-tab`, `ui-switch`, and `ui-send` share a cross-process UI lock.
 
-On a pre-click failure after its own write, `ui-send` restores the prior empty composer only while the same window, tab, and exact text remain. `已还原` confirms the read-back; `未还原` means the target or draft changed, so inspect the App before retrying. It does not clear a different tab or a draft changed by someone else.
-
-## Two-way: Claude ⇄ Codex (send, then wake on state return)
-
-Both sides install this skill. **Writing into the other app's UI happens only in one direction: into Codex.** The way back is the state signal: when the other side's turn ends, its session goes back to idle, and the watcher wakes the sender, who then reads the reply from the log. No one types into Claude's window.
-
-| Direction | Send | Get the result |
-| --- | --- | --- |
-| Claude → Codex | Front end (Computer use, or cua-driver `ui-send`) | Run `watch <Codex ID> --since SINCE` **in the background**. When it exits, `wait` reads the reply and checks its header |
-| Codex → Claude (review, report) | Codex just replies in its own session with the reply header | Same as above: Claude's background `watch` picks it up |
-| Codex checks Claude | — | `--app claude status/wait/watch <Claude ID>` (read-only) |
-
-Claude Code: start the watcher with Bash `run_in_background: true`. The harness re-invokes you when it exits, so don't poll. Other agents: use your own background or notify mechanism, or call `watch` in the foreground with a timeout.
+The native bridge is `scripts/codex_ax.swift`, using only macOS AppKit and ApplicationServices. It reads the body from stdin, writes with `AXValue`, checks the full multiline value and current tab, then AXPresses the unique Send button. If failure occurs after writing but before a successful press, it clears only its own unchanged composer in the same tab and reports `已还原`. An empty composer may expose a placeholder plus newline as AXValue; clearing uses an empty string and checks that Send disappears. If the target or draft changed, `未还原` requires manual inspection. Verify every delivery and reply from rollout records.
 
 ### Loop rules (mandatory)
 
@@ -127,7 +115,7 @@ Claude Code: start the watcher with Bash `run_in_background: true`. The harness 
 ## Why it is cheap and fast
 
 - The back end reads JSONL: a few lines of text per check, no images.
-- UI inspection via cua-driver's accessibility tree (`ui-tab`) uses no images. With Computer use, the only image is a 0.1-scale capture before a write or click.
+- Native AX inspection (`ui-tab`) uses no images. With Computer use, the only image is a 0.1-scale capture before a write or click.
 - The CLI channel never touches the UI.
 
 ## Report format

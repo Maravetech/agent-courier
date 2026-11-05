@@ -12,6 +12,7 @@ Check every item, in order. **Tested** means verified by hand on the environment
 | Claude desktop app | 4.16336.0 (Code tab) |
 | cua-driver | 0.5.0 (optional, for the fallback channel) |
 | Python | 3.9.6, standard library only |
+| Swift | Apple Swift 6.4 (`swift --version`), for native AX fallback |
 
 Other versions may work but are untested. A Codex app update can change the UI, so re-run the self-check (section 7) after updating.
 
@@ -38,13 +39,15 @@ Other versions may work but are untested. A Codex app update can change the UI, 
 | 6 | Keep the Codex app running, not minimized, on the current Space | Use `app_bring_to_current_space` if needed. It doesn't take focus | Clicks and writes are refused |
 | 7 | No clipboard grant and no full-screen control needed | Writes use whole-field AXValue replacement | — |
 
-## 4. Front end, fallback: cua-driver
+## 4. Front end, fallback: native AX plus cua-driver
 
 | # | Item | How |
 | --- | --- | --- |
 | 1 | Install trycua's CuaDriver | See the cua project. Tested with 0.5.0 |
 | 2 | Grant CuaDriver its own **Accessibility** and **Screen Recording** | `cua-driver permissions grant` |
 | 3 | Daemon running | `cua-driver status` |
+| 4 | Swift command line tools available | `swift --version`; native AX bridge imports AppKit and ApplicationServices |
+| 5 | Accessibility permission for the shell running Swift | `swift -e 'import ApplicationServices; print(AXIsProcessTrusted())'` must print `true` |
 
 Without cua-driver, agents lacking Computer use can only use the CLI channel, which reaches new sessions only.
 
@@ -68,6 +71,6 @@ State and logs go to `$COURIER_STATE_DIR` (default `~/.local/state/courier`).
 ## 7. Self-check after installing
 
 1. `python3 -I scripts/courier.py find <any session title>` lists the session.
-2. Create a test session: compose a body with `compose --new` that asks only for the reply 「收到」.
-3. Send it through Computer use or `send --new`, then `locate --text <snippet>` → `verify` → `wait <ID> --text <snippet>`. For cua-driver, first locate an existing test session and use its full ID and exact title. Expect the reply 「收到」 and `回复抬头：✅`.
+2. Create a test session: compose a body with `compose --new` that asks for the expected `【回复】` header and a unique marker.
+3. Send it through Computer use or `send --new`, then `locate --text <snippet>` → `verify` → `wait <ID> --text <snippet>`. For native AX, first locate an existing idle test session and use its full ID and exact title. Request a reply whose first line is the expected `【回复】` header; `wait` requires that header, so a bare 「收到」 fails by design.
 4. The frontmost app never changes during the run. Return Codex to the page the user was on.

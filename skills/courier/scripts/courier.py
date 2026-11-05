@@ -17,7 +17,7 @@ App 里开着的会话要走界面通道（后台电脑操作工具），见上�
   codex_thread.py compose --from-agent <App或Agent> --from-session <编号> (--to <ID或标题> | --new) --file <正文> [--out <文件>]
                                                加投递抬头「【投递】Claude Code·0007 → Codex·00159」；send 和前端发送都必须用带抬头的正文
   codex_thread.py ui-tab | ui-switch <完整标题> | ui-send --file <带抬头正文> --session-id <ID> --expect-tab <完整标题>
-                                               前端备用通道（cua-driver，纯无障碍接口，不截图、不抢焦点）
+                                               前端备用通道（macOS 原生 AX + cua-driver 窗口边界，不截图、不抢焦点）
   codex_thread.py send [<ID或标题>] --file <正文文件> [--new]
                                                命令行通道：--new 新建会话；给 ID 则续接没在 App 里打开的会话
 
@@ -715,6 +715,7 @@ def cmd_send(a):
 # 全程前台不变。唯一抢过焦点的是 AXPress 输入框本身 —— 本实现从不点输入框。
 
 CODEX_BUNDLE = "com.openai.codex"
+USE_NATIVE_AX = True
 STOP_LABELS = tuple(x for x in os.environ.get("COURIER_STOP_LABELS", "停止,Stop,停止する,Stopp,Arrêter,Detener").split(",") if x)
 SEND_LABELS = tuple(x for x in os.environ.get("COURIER_SEND_LABELS", "发送,Send,送信,Senden,Envoyer,Enviar").split(",") if x)
 
@@ -746,6 +747,35 @@ def cua_target(window_id=None):
     if len(wins) != 1:
         raise RuntimeError("Codex 同时有多个屏上窗口；请用 --window-id 指定目标")
     return pid, wins[0]["window_id"]
+
+
+def native_ui_action(action, title="", body="", window_id=None):
+    """Bind a WindowServer window to the bundle's unique native AXWindow.
+
+    Only window geometry comes from cua-driver. Controls and actions are all
+    resolved inside the matched AXWindow by the Swift bridge. Body uses stdin,
+    so it never appears in argv or diagnostics.
+    """
+    import subprocess
+    pid, wid = cua_target(window_id)
+    windows = json.loads(cua("list_windows", {"pid": pid}))["windows"]
+    matches = [w for w in windows if w.get("pid") == pid and w.get("window_id") == wid
+               and w.get("is_on_screen")]
+    if len(matches) != 1:
+        raise RuntimeError("屏上窗口无法唯一确认")
+    bounds = matches[0]["bounds"]
+    script = os.path.join(os.path.dirname(__file__), "codex_ax.swift")
+    cmd = ["swift", script, action, title, str(pid),
+           *(str(bounds[k]) for k in ("x", "y", "width", "height")),
+           ",".join(SEND_LABELS)]
+    run = subprocess.run(cmd, input=body, capture_output=True, text=True, timeout=45)
+    try:
+        result = json.loads(run.stdout)
+    except ValueError:
+        raise RuntimeError("原生 AX 桥接未返回可解析结果") from None
+    if not isinstance(result, dict) or (run.returncode == 0) != bool(result.get("ok")):
+        raise RuntimeError("原生 AX 桥接结果与退出码不一致")
+    return result
 
 
 def cua_tree(pid, wid, query):
@@ -829,6 +859,13 @@ def cua_textarea(pid, wid):
 
 @ui_locked
 def cmd_ui_tab(a):
+    if USE_NATIVE_AX:
+        result = native_ui_action("tab", window_id=getattr(a, "window_id", None))
+        if not result["ok"]:
+            print(f"无法确认当前标签页：{result['reason']}")
+            return 2
+        print(f"当前标签页：{result['tab']}  前台：{result['front_before']} → {result['front_after']}")
+        return 0
     pid, wid = cua_target(getattr(a, "window_id", None))
     print(f"当前标签页：{cua_tab(pid, wid)}  前台：{cua_front()}")
     return 0
@@ -842,6 +879,13 @@ def cmd_ui_switch(a):
     if len(matches) != 1:
         print("拒绝切页：必须给索引中唯一的完整标题")
         return 2
+    if USE_NATIVE_AX:
+        result = native_ui_action("switch", a.title, window_id=getattr(a, "window_id", None))
+        if not result["ok"]:
+            print(f"未切换：目标「{a.title}」，实际标签页「{result.get('actual_tab', '无法判定')}」；{result['reason']}")
+            return 2
+        print(f"已切换：标签页「{result['tab']}」  前台 {result['front_before']} → {result['front_after']}")
+        return 0
     pid, wid = cua_target(getattr(a, "window_id", None))
     before = cua_front()
     try:
@@ -914,6 +958,25 @@ def cmd_ui_send(a):
     if not parsed or parsed[1] != token("Codex", session_number(d.get("thread_name"), d["id"])):
         print("拒发：正文收件令牌与目标会话不符", file=sys.stderr)
         return 2
+    if USE_NATIVE_AX:
+        current = native_ui_action("tab", window_id=getattr(a, "window_id", None))
+        if not current["ok"] or current.get("tab") != a.expect_tab:
+            print(f"拒发：当前标签页是「{current.get('tab', '无法判定')}」，不是「{a.expect_tab}」；没有写入")
+            return 2
+        if parsed[1] != token("Codex", session_number(current["tab"], d["id"])):
+            print("拒发：投递抬头的收件编号与当前标签页编号不符；没有写入")
+            return 2
+        since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        result = native_ui_action("send", a.expect_tab, body, getattr(a, "window_id", None))
+        if not result["ok"]:
+            suffix = ("；送达结果不明，请用 verify 核对" if result.get("sent_possible") else
+                      "；已还原" if result.get("restored") is True else
+                      "；未还原：目标或输入框已变化，请人工核对" if result.get("restored") is False else "；没有写入")
+            print(f"拒发：{result['reason']}{suffix}")
+            return 2
+        print(f"已点发送：标签页「{result['tab']}」  SINCE={since}  前台 {result['front_before']} → {result['front_after']}")
+        print("下一步：verify / wait 核对送达与回复")
+        return 0
     try:
         pid, wid = cua_target(getattr(a, "window_id", None))
         tab = cua_tab(pid, wid)
