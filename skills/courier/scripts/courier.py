@@ -642,19 +642,6 @@ def cua_textarea(pid, wid):
     return int(m.group(1)), m.group(2), value
 
 
-def clean_ui_body(body):
-    """Remove the observed Markdown transport escape on every line of a delivery.
-
-    Only normalize the distinctive case where the delivery header and every
-    following line boundary carry a trailing backslash. Isolated backslashes
-    in a user's text remain intact.
-    """
-    lines = body.split("\n")
-    if len(lines) > 1 and lines[0].startswith(HEADER_PREFIX) and all(line.endswith("\\") for line in lines[:-1]):
-        return "\n".join(line[:-1] for line in lines[:-1]) + "\n" + lines[-1]
-    return body
-
-
 def cmd_ui_tab(a):
     pid, wid = cua_target()
     print(f"当前标签页：{cua_tab(pid, wid)}  前台：{cua_front()}")
@@ -685,7 +672,7 @@ def cmd_ui_send(a):
     """写输入框（set_value 整框）+ 点「发送」。输入框非空（有草稿）一律拒绝，不覆盖。"""
     import re
     with open(a.file, encoding="utf-8") as source:
-        body = clean_ui_body(source.read().rstrip())
+        body = source.read().rstrip()
     if not has_header(body):
         print("拒发：正文第一行没有投递抬头。先用 compose 生成。", file=sys.stderr)
         return 2

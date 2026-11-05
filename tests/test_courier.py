@@ -194,11 +194,6 @@ class CourierTest(unittest.TestCase):
              patch.object(courier, "cua_target", side_effect=RuntimeError("must not access UI")):
             self.assertEqual(courier.cmd_ui_send(args), 2)
 
-    def test_ui_body_removes_transport_backslashes_on_every_line(self):
-        raw = "【投递】Claude Code·0007 → Codex·00159\\\n\\\n第一行\\\n第二行"
-        self.assertEqual(courier.clean_ui_body(raw), "【投递】Claude Code·0007 → Codex·00159\n\n第一行\n第二行")
-        self.assertEqual(courier.clean_ui_body("路径 C:\\\n保留正文"), "路径 C:\\\n保留正文")
-
     def test_ax_textarea_decodes_escaped_newlines_for_draft_check(self):
         with patch.object(courier, "cua_tree", return_value='[3] AXTextArea "Message" = "第一行\\n第二行"'):
             self.assertEqual(courier.cua_textarea(42, 1), (3, "Message", "第一行\n第二行"))
