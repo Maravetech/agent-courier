@@ -39,7 +39,7 @@ body:
     attributes:
       label: Versions
       description: agent-courier, macOS, Codex app, Python, and the calling agent.
-      placeholder: agent-courier 0.1.0 / macOS 15 / Codex 26.x / Python 3.12 / Claude Code
+      placeholder: agent-courier 0.3.0 / macOS 15 / Codex 26.x / Python 3.12 / Claude Code
     validations:
       required: true
   - type: textarea

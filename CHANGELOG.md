@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0
+
+Fixes from an independent security review. Upgrade from any earlier version.
+
+Breaking:
+
+- `wait` exits non-zero when the turn was aborted, when there is no reply, or when the reply header does not match the delivery.
+- `ui-send` needs the exact target session, refuses ambiguous titles, and re-reads the tab and the input box right before sending.
+
+Changes:
+
+- H3: UI delivery is bound to the exact session; the draft and tab are checked again after writing and before sending, so a tab switch in between stops the send and keeps the draft.
+- A2: `wait` is anchored to the delivered user message instead of a wall-clock `--since`, so starting it late no longer misses a turn that has already ended.
+- A3: `watch --stream` prints one line per state change (started, completed, aborted, waiting) for callers that run it in the background.
+- M1: Aborted turns and malformed or mismatched reply headers no longer count as success.
+- Multi-line input box values read through accessibility are decoded before the draft check.
+- M5: CI actions pinned to commit SHAs, with `permissions: contents: read`.
+- L1: README, SKILL.md and PREREQUISITES.md match the code.
+
 ## 0.2.1
 
 - New icon: block-pixel courier bird with a letter in its beak (`assets/make_icon.py`).
