@@ -51,9 +51,13 @@ def codex_index():
 
 
 def codex_log(thread_id):
-    hits = glob.glob(os.path.join(CODEX, "sessions", "*", "*", "*", f"rollout-*-{thread_id}.jsonl"))
-    hits += glob.glob(os.path.join(CODEX, "archived_sessions", "**", f"rollout-*-{thread_id}.jsonl"), recursive=True)
-    return max(hits, key=os.path.getmtime) if hits else None
+    """All rollout segments for one session, ordered by their rollout timestamp."""
+    key = glob.escape(thread_id)
+    hits = []
+    for suffix in (f"-{key}.jsonl", f"-{key}_*.jsonl"):
+        hits += glob.glob(os.path.join(CODEX, "sessions", "*", "*", "*", "rollout-*" + suffix))
+        hits += glob.glob(os.path.join(CODEX, "archived_sessions", "**", "rollout-*" + suffix), recursive=True)
+    return sorted(set(hits), key=lambda p: os.path.basename(p))
 
 
 def resolve(key):
@@ -85,6 +89,12 @@ def one(key):
 
 
 def events(path):
+    """Stream one log or merge all segments by event timestamp."""
+    if isinstance(path, (list, tuple)):
+        import heapq
+        streams = (events(item) for item in path)
+        yield from heapq.merge(*streams, key=lambda row: row.get("timestamp", ""))
+        return
     with open(path, encoding="utf-8") as f:
         for line in f:
             try:
@@ -219,7 +229,7 @@ def all_logs():
 
 def log_id(path):
     base = os.path.basename(path)[:-6]
-    return base if APP == "claude" else base.split("-", 6)[-1]
+    return base if APP == "claude" else base.split("-", 6)[-1].split("_", 1)[0]
 
 
 def cmd_watch_once(a):
@@ -230,7 +240,8 @@ def cmd_watch_once(a):
     targets = [one(k) for k in a.keys]
     deadline = time.time() + (a.timeout if a.timeout is not None else 3600)
     while True:
-        for d, path in targets:
+        for d, _ in targets:
+            path = rollout_path(d["id"])
             msgs, running, last_done = scan(path, a.since)
             if last_done and last_done[0] >= a.since and not running:
                 replies = [m for m in msgs if m[1] == "assistant"]
@@ -251,7 +262,9 @@ def cmd_find(a):
         print("没找到")
         return 1
     for d in hits:
-        print(f"{d['id']}\t{d.get('thread_name')}\t{rollout_path(d['id'])}")
+        paths = rollout_path(d["id"])
+        shown = "; ".join(paths) if isinstance(paths, list) else paths
+        print(f"{d['id']}\t{d.get('thread_name')}\t{shown}")
     return 0
 
 
@@ -261,13 +274,16 @@ def cmd_locate(a):
     cutoff = time.time() - a.hours * 3600
     idx = load_index()
     found = 0
-    for path in sorted(files, key=os.path.getmtime, reverse=True):
-        if os.path.getmtime(path) < cutoff:
+    groups = {}
+    for path in files:
+        groups.setdefault(log_id(path), []).append(path)
+    for tid, paths in sorted(groups.items(), key=lambda item: max(os.path.getmtime(p) for p in item[1]), reverse=True):
+        if max(os.path.getmtime(p) for p in paths) < cutoff:
             continue
-        msgs, _, _ = scan(path, a.since)
+        msgs, _, _ = scan(paths, a.since)
         if any(r == "user" and a.text in t for _, r, t in msgs):
-            tid = log_id(path)
-            print(f"{tid}\t{(idx.get(tid) or {}).get('thread_name', '(索引暂无标题)')}\t{path}")
+            latest = max(paths, key=(lambda p: os.path.basename(p)) if APP == "codex" else os.path.getmtime)
+            print(f"{tid}\t{(idx.get(tid) or {}).get('thread_name', '(索引暂无标题)')}\t{latest}")
             found += 1
     if not found:
         print(f"没找到含「{a.text}」的用户消息（最近 {a.hours} 小时）")
@@ -278,7 +294,7 @@ def cmd_status(a):
     d, path = one(a.key)
     msgs, running, last_done = scan(path)
     print(f"会话：{d.get('thread_name')}  {d['id']}")
-    print(f"记录：{path}")
+    print(f"记录：{'; '.join(path) if isinstance(path, list) else path}")
     print(f"回合：{'正在运行' if running else '空闲'}；最后结束：{last_done}")
     for ts, role, t in (msgs[-a.n:] if a.n > 0 else []):
         print(f"--- {ts} {role}\n{t[:a.chars]}")
@@ -310,9 +326,10 @@ def cmd_verify(a):
 
 
 def cmd_wait(a):
-    d, path = one(a.key)
+    d, _ = one(a.key)
     deadline = time.time() + a.timeout
     while True:
+        path = rollout_path(d["id"])
         anchors, replies, last_done, running = (delivery_turn(path, a.text) if a.text
                                                else legacy_turn(path, a.since))
         if anchors > 1:
@@ -447,10 +464,11 @@ def status_event(row):
 
 
 def cmd_watch_stream(a):
-    _, path = one(a.keys[0])
+    d, _ = one(a.keys[0])
     deadline = time.monotonic() + a.timeout if a.timeout is not None else None
     seen, current = 0, None
     while True:
+        path = rollout_path(d["id"])
         rows = list(events(path))
         if len(rows) < seen:
             seen, current = 0, None

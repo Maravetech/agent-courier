@@ -178,6 +178,45 @@ class CourierTest(unittest.TestCase):
         self.assertIn(TID2, out)
         self.assertEqual(self.run_cli("status", TID2)[0], 0)
 
+    def segmented_rollout(self):
+        segment_id = '01aaaaaa-0000-7000-8000-000000000099'
+        path = os.path.join(self.tmp.name, 'sessions', '2026', '01', '02',
+                            f'rollout-2026-01-02T00-10-00-{TID}_{segment_id}.jsonl')
+        header = '【投递】Claude Code·0007 → Codex·00159'
+        rows = [
+            line('2026-01-02T00:10:00.000Z', 'event_msg', {'type': 'task_started'}),
+            msg('2026-01-02T00:10:01.000Z', 'user', header + '\n\nsegment-marker-93 marker-42'),
+            msg('2026-01-02T00:10:02.000Z', 'assistant', '【回复】Codex·00159 → Claude Code·0007\nsegment-done'),
+            line('2026-01-02T00:10:03.000Z', 'event_msg', {'type': 'task_complete'}),
+        ]
+        Path(path).write_text('\n'.join(rows) + '\n', encoding='utf-8')
+        return path
+
+    def test_segmented_find_and_status_use_latest_segment(self):
+        new_path = self.segmented_rollout()
+        code, found = self.run_cli('find', TID)
+        self.assertEqual(code, 0, found)
+        self.assertIn(new_path, found)
+        code, status = self.run_cli('status', TID, '-n', '1')
+        self.assertEqual(code, 0, status)
+        self.assertIn('2026-01-02T00:10:03.000Z', status)
+        self.assertIn('segment-done', status)
+
+    def test_segmented_verify_and_wait_find_delivery_after_abort(self):
+        self.segmented_rollout()
+        code, verified = self.run_cli('verify', TID, '--text', 'segment-marker-93', '--timeout', '0')
+        self.assertEqual(code, 0, verified)
+        code, waited = self.run_cli('wait', TID, '--text', 'segment-marker-93', '--timeout', '0')
+        self.assertEqual(code, 0, waited)
+        self.assertIn('回复抬头：✅', waited)
+        self.assertIn('segment-done', waited)
+
+    def test_segmented_locate_returns_one_session(self):
+        self.segmented_rollout()
+        code, located = self.run_cli('locate', '--text', 'marker-42', '--hours', '1000000')
+        self.assertEqual(code, 0, located)
+        self.assertEqual(len(located.strip().splitlines()), 1)
+
     def test_compose(self):
         body = self.write("b.txt", "do the thing")
         out_file = os.path.join(self.tmp.name, "o.txt")
