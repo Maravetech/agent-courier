@@ -299,17 +299,18 @@ def cmd_wait(a):
     d, path = one(a.key)
     deadline = time.time() + a.timeout
     while True:
-        msgs, running, last_done = scan(path, a.since)
-        started = any(r == "user" for _, r, _ in msgs)
-        if started and not running and last_done and last_done[0] >= a.since:
-            replies = [m for m in msgs if m[1] == "assistant"]
+        anchors, replies, last_done, running = delivery_turn(path, a.text)
+        if anchors > 1:
+            print("投递锚点不唯一；请提供更独特的 --text", file=sys.stderr)
+            return 2
+        if anchors == 1 and last_done:
             print(f"回合结束：{last_done[1]} @ {last_done[0]}")
             if not replies:
                 print("（这一回合没有助手回复）")
                 return 0
             ts, _, t = replies[-1]
             # 回复抬头核对：按本轮最后一条投递的抬头推出应有的回复抬头
-            sent = [m for m in msgs if m[1] == "user" and parse_header(m[2])]
+            sent = [m for m in replies if m[1] == "user" and parse_header(m[2])]
             if sent:
                 f_tok, t_tok = parse_header(sent[-1][2])
                 want = reply_line(f_tok, t_tok)
@@ -321,6 +322,29 @@ def cmd_wait(a):
             print(f"等待超时（{a.timeout}s）：回合{'仍在运行' if running else '未开始'}")
             return 3
         time.sleep(a.interval)
+
+
+def delivery_turn(path, text):
+    """Find the first turn end after the unique matching delivery, regardless of wall time."""
+    anchors, replies, done, running = 0, [], None, False
+    for d in events(path):
+        p = d.get("payload") or {}
+        ts = d.get("timestamp", "")
+        if d.get("type") == "response_item" and p.get("type") == "message":
+            role, value = p.get("role"), text_of(p)
+            if role == "user" and is_real_user(value) and text in value:
+                anchors += 1
+                if anchors == 1:
+                    replies = [(ts, "user", value)]
+                    done = None
+                    running = True
+            elif anchors == 1 and done is None and role == "assistant":
+                replies.append((ts, role, value))
+        elif anchors == 1 and done is None and d.get("type") == "event_msg":
+            if p.get("type") in ("task_complete", "turn_aborted"):
+                done = (ts, p["type"])
+                running = False
+    return anchors, replies, done, running
 
 
 # 发送方名称：默认任何不含特殊符号的名字都可以；设置 COURIER_AGENTS（逗号分隔）就只认名单里的
@@ -634,7 +658,7 @@ def main():
     s.set_defaults(fn=cmd_status)
     v = sub.add_parser("verify"); v.add_argument("key"); v.add_argument("--text", required=True)
     v.add_argument("--since"); v.set_defaults(fn=cmd_verify)
-    w = sub.add_parser("wait"); w.add_argument("key"); w.add_argument("--since", required=True)
+    w = sub.add_parser("wait"); w.add_argument("key"); w.add_argument("--text", required=True); w.add_argument("--since")
     w.add_argument("--timeout", type=int, default=600); w.add_argument("--interval", type=float, default=3)
     w.set_defaults(fn=cmd_wait)
     c = sub.add_parser("compose"); c.add_argument("--from-agent", required=True)

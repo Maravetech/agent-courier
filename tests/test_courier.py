@@ -85,14 +85,19 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(self.run_cli("verify", TID, "--text", "ignored")[0], 1)  # environment context is not a user message
 
     def test_wait_and_reply_header(self):
-        code, out = self.run_cli("wait", TID, "--since", "2026-01-02T00:00:00Z", "--timeout", "2")
+        code, out = self.run_cli("wait", TID, "--text", "marker-42", "--timeout", "2")
         self.assertEqual(code, 0, out)
         self.assertIn("回复抬头：✅", out)
         self.assertIn("收到", out)
 
     def test_wait_timeout(self):
-        code, _ = self.run_cli("wait", TID, "--since", "2026-01-05T00:00:00Z", "--timeout", "1", "--interval", "0.2")
+        code, _ = self.run_cli("wait", TID, "--text", "missing-marker", "--timeout", "1", "--interval", "0.2")
         self.assertEqual(code, 3)
+
+    def test_wait_uses_delivery_anchor_even_if_started_late(self):
+        code, out = self.run_cli("wait", TID, "--text", "marker-42", "--since", "2026-01-03T00:00:00Z", "--timeout", "1")
+        self.assertEqual(code, 0, out)
+        self.assertIn("收到", out)
 
     def test_locate_includes_archived(self):
         code, out = self.run_cli("locate", "--text", "marker-77", "--hours", "1000000")
