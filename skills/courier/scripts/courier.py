@@ -484,6 +484,8 @@ def cua_target():
     wins = [w for w in wins if w.get("is_on_screen") and w["bounds"]["height"] > 200]
     if not wins:
         raise RuntimeError("Codex 没有在屏上的主窗口（最小化或在别的桌面空间）")
+    if len(wins) != 1:
+        raise RuntimeError("Codex 同时有多个屏上窗口；无法安全确定目标窗口")
     return pid, wins[0]["window_id"]
 
 
@@ -527,6 +529,9 @@ def cmd_ui_switch(a):
     if not hits:
         print(f"左侧列表里没找到「{a.title}」")
         return 1
+    if len(hits) != 1:
+        print(f"左侧列表有 {len(hits)} 个标题匹配；请给唯一完整标题")
+        return 2
     cua("click", {"pid": pid, "window_id": wid, "element_index": int(hits[0][0])})
     time.sleep(1.5)
     tab = cua_tab(pid, wid)
@@ -541,9 +546,23 @@ def cmd_ui_send(a):
     if not has_header(body):
         print("拒发：正文第一行没有投递抬头。先用 compose 生成。", file=sys.stderr)
         return 2
+    if not getattr(a, "session_id", None) or not a.expect_tab:
+        print("拒发：必须给完整 --session-id 与 --expect-tab", file=sys.stderr)
+        return 2
+    d, _ = one(a.session_id)
+    if d["id"] != a.session_id or d.get("thread_name") != a.expect_tab:
+        print("拒发：会话 ID 与完整标题不一致", file=sys.stderr)
+        return 2
+    if sum(x.get("thread_name") == a.expect_tab for x in load_index().values()) != 1:
+        print("拒发：完整标题在会话索引中不唯一", file=sys.stderr)
+        return 2
+    parsed = parse_header(body)
+    if not parsed or parsed[1] != token("Codex", session_number(d.get("thread_name"), d["id"])):
+        print("拒发：正文收件令牌与目标会话不符", file=sys.stderr)
+        return 2
     pid, wid = cua_target()
     tab = cua_tab(pid, wid)
-    if not tab or a.expect_tab not in tab:
+    if tab != a.expect_tab:
         print(f"拒发：当前标签页是「{tab}」，不是「{a.expect_tab}」。先 ui-switch。")
         return 2
     before = cua_front()
@@ -552,15 +571,19 @@ def cmd_ui_send(a):
             print(f"拒发：目标会话正在运行回合（界面有「{lab}」按钮）。先 watch 等它状态恢复。")
             return 2
     idx, placeholder, value = cua_textarea(pid, wid)
-    # 上次写入后没发出去，重试时不算草稿。AX 树把多行值渲染到后续行，只比较第一行（投递抬头）
-    mine = value.strip().splitlines()[0].strip() == body.strip().splitlines()[0].strip() if value.strip() else False
-    if value.strip() and value.strip() != placeholder.strip() and not mine:
+    if value.strip() and value.strip() != placeholder.strip():
         print(f"拒发：输入框里有草稿「{value[:40]}」，不覆盖。")
         return 2
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    if not mine:
-        cua("set_value", {"pid": pid, "window_id": wid, "element_index": idx, "value": body})
-        time.sleep(0.4)
+    cua("set_value", {"pid": pid, "window_id": wid, "element_index": idx, "value": body})
+    time.sleep(0.4)
+    if cua_target() != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
+        print("拒发：写入后目标窗口或标签页已变化；草稿保留")
+        return 2
+    new_idx, _, new_value = cua_textarea(pid, wid)
+    if new_idx != idx or new_value != body:
+        print("拒发：写入后的正文与原文不一致；草稿保留")
+        return 2
     btn = None
     for lab in SEND_LABELS:  # 按按钮文字单独查：查全部按钮会被截断
         m = re.search(r'\[(\d+)\] AXButton "' + re.escape(lab) + '"', cua_tree(pid, wid, lab))
@@ -570,6 +593,9 @@ def cmd_ui_send(a):
     if btn is None:
         print("写入了但找不到「发送」按钮，没有发送。请人工检查输入框。")
         return 1
+    if cua_target() != (pid, wid) or cua_tab(pid, wid) != a.expect_tab:
+        print("拒发：点击前目标窗口或标签页已变化；草稿保留")
+        return 2
     cua("click", {"pid": pid, "window_id": wid, "element_index": btn})
     print(f"已点发送：标签页「{tab}」  SINCE={since}  前台 {before} → {cua_front()}")
     print("下一步：verify / wait 核对送达与回复")
@@ -600,7 +626,7 @@ def main():
     lo.add_argument("--hours", type=float, default=24); lo.set_defaults(fn=cmd_locate)
     sub.add_parser("ui-tab").set_defaults(fn=cmd_ui_tab)
     us = sub.add_parser("ui-switch"); us.add_argument("title"); us.set_defaults(fn=cmd_ui_switch)
-    ud = sub.add_parser("ui-send"); ud.add_argument("--file", required=True); ud.add_argument("--expect-tab", required=True)
+    ud = sub.add_parser("ui-send"); ud.add_argument("--file", required=True); ud.add_argument("--session-id", required=True); ud.add_argument("--expect-tab", required=True)
     ud.set_defaults(fn=cmd_ui_send)
     n = sub.add_parser("send"); n.add_argument("key", nargs="?"); n.add_argument("--file", required=True)
     n.add_argument("--new", action="store_true"); n.add_argument("--cwd")

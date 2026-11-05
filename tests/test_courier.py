@@ -5,8 +5,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import importlib.util
+from types import SimpleNamespace
+from unittest.mock import patch
 
 SCRIPT = os.path.join(os.path.dirname(__file__), "..", "skills", "courier", "scripts", "courier.py")
+spec = importlib.util.spec_from_file_location("courier_under_test", SCRIPT)
+courier = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(courier)
 
 TID = "01aaaaaa-0000-7000-8000-000000000001"
 TID2 = "01aaaaaa-0000-7000-8000-000000000002"
@@ -185,6 +191,32 @@ class ClaudeBackendTest(unittest.TestCase):
     def test_front_end_refused_for_claude(self):
         self.assertEqual(self.cli("ui-tab")[0], 2)
 
+    def test_ui_send_requires_exact_target_and_rechecks_before_click(self):
+        body = self.write("delivery.txt", "【投递】Claude Code·0007 → Codex·00159\n\nhello")
+        args = SimpleNamespace(file=body, expect_tab=None, session_id=None)
+        with patch.object(courier, "cua_target", side_effect=RuntimeError("must not call UI")):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+        args.expect_tab = "00159 test target"
+        args.session_id = TID
+        calls = []
+        tabs = iter([args.expect_tab, "00160 archived one"])
+        with patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")), \
+             patch.object(courier, "cua_target", return_value=(42, 1)), patch.object(courier, "cua_tab", side_effect=lambda *_: next(tabs)), \
+             patch.object(courier, "cua_textarea", side_effect=[(3, "Message", ""), (3, "Message", open(body, encoding="utf-8").read().rstrip())]), \
+             patch.object(courier, "cua_tree", return_value='[9] AXButton "发送"'), patch.object(courier, "cua_front", return_value=[]), \
+             patch.object(courier, "cua", side_effect=lambda tool, data: calls.append(tool) or "{}"), patch.object(courier.time, "sleep"):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+        self.assertNotIn("click", calls)
+
+    def test_ui_send_rejects_duplicate_titles_before_accessing_ui(self):
+        body = self.write("delivery.txt", "【投递】Claude Code·0007 → Codex·00159\n\nhello")
+        index = os.path.join(self.tmp.name, "session_index.jsonl")
+        with open(index, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": TID2, "thread_name": "00159 test target"}) + "\n")
+        args = SimpleNamespace(file=body, expect_tab="00159 test target", session_id=TID)
+        with patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "INDEX", index), \
+             patch.object(courier, "cua_target", side_effect=RuntimeError("must not access UI")):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
 
 if __name__ == "__main__":
     unittest.main()
