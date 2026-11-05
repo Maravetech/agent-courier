@@ -23,7 +23,7 @@
 ## Safety
 
 - Never overwrites a draft: if the input box holds anything but its placeholder, it stops and asks.
-- Checks the active tab before sending, and refuses messages without an identity header.
+- The cua-driver helper requires the full session ID and exact tab title, then checks the tab and draft again before clicking Send. It refuses messages without an identity header.
 - Background only: no full-screen control, no clipboard, never clicks links.
 - Stops and hands back to you on anything about money, credentials, rule changes, irreversible actions, or no progress.
 
@@ -61,10 +61,13 @@ python3 -I $C find 00159                                  # get the session ID
 python3 -I $C compose --from-agent "Claude Code" --from-session 0007 \
   --to <ID> --file body.txt --out msg.txt                 # add identity header
 # send msg.txt via Computer use, or the fallback:
-python3 -I $C ui-switch "00159" && python3 -I $C ui-send --file msg.txt --expect-tab "00159"
+python3 -I $C ui-switch "<exact title>" && python3 -I $C ui-send --file msg.txt --session-id <ID> --expect-tab "<exact title>"
 python3 -I $C verify <ID> --text "<snippet>" --since <UTC time>
-python3 -I $C wait <ID> --since <UTC time>
+python3 -I $C wait <ID> --text "<unique delivery snippet>"
+python3 -I $C watch <ID>             # stream start / complete / abort / waiting for approval
 ```
+
+`ui-send` is for existing indexed sessions. Use Computer use or `send --new` to create a session. `wait` anchors to the matching delivery message, even if you start waiting after its turn has ended. A failed or mismatched reply exits nonzero. The offline tests do not prove real Codex UI delivery.
 
 ## Requirements
 
