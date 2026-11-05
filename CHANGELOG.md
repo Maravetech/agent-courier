@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- New icon: block-pixel courier bird with a letter in its beak (`assets/make_icon.py`).
+
 ## 0.2.0
 
 - Two-way Claude ⇄ Codex: `watch` blocks until any listed session finishes a turn (state returns to idle) so the sender wakes and reads the reply; meant to run in the background.
