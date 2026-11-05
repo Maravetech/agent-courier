@@ -8,8 +8,8 @@ App 里开着的会话要走界面通道（后台电脑操作工具），见上�
 用法：
   codex_thread.py find <标题片段>              列出匹配的会话（ID、标题、rollout 路径）
   codex_thread.py status <ID或标题片段>        当前回合是否在跑 + 最近几条消息
-  codex_thread.py verify <ID或标题片段> --text <正文片段> [--since <ISO时间>]
-                                               核对这条用户消息是否已写进记录（送达证据）
+  codex_thread.py verify <ID或标题片段> --text <正文片段> [--since <ISO时间>] [--timeout 30]
+                                               轮询核对用户消息是否已写进记录（送达证据）
   codex_thread.py wait <ID或标题片段> --text <唯一投递片段> [--timeout 600]
                                                等对应投递后的首个回合结束，核对最终回复
   codex_thread.py watch <ID或标题片段>            持续输出开工 / 完成 / 中止 / 等待确认的变化
@@ -286,14 +286,27 @@ def cmd_status(a):
 
 
 def cmd_verify(a):
-    d, path = one(a.key)
-    msgs, _, _ = scan(path, a.since)
-    for ts, role, t in msgs:
-        if role == "user" and a.text in t:
-            print(f"送达：{ts} user 消息含「{a.text}」  会话 {d['id']}")
-            return 0
-    print(f"未送达：{d['id']} 在 {a.since or '全部记录'} 之后没有含「{a.text}」的用户消息")
-    return 1
+    deadline = time.monotonic() + max(0, a.timeout)
+    while True:
+        hits = resolve(a.key)
+        if len(hits) > 1:
+            print("会话不唯一；verify 请给完整 ID", file=sys.stderr)
+            return 2
+        d = hits[0] if hits else None
+        path = rollout_path(d["id"]) if d else None
+        if path:
+            try:
+                msgs, _, _ = scan(path, a.since)
+            except FileNotFoundError:
+                msgs = []  # record can be created or rotated between polls
+            for ts, role, t in msgs:
+                if role == "user" and a.text in t:
+                    print(f"送达：{ts} user 消息含「{a.text}」  会话 {d['id']}")
+                    return 0
+        if time.monotonic() >= deadline:
+            print(f"未送达：{d['id'] if d else a.key} 在 {a.since or '全部记录'} 之后没有含「{a.text}」的用户消息")
+            return 1
+        time.sleep(max(0.05, a.interval))
 
 
 def cmd_wait(a):
@@ -779,7 +792,8 @@ def main():
     s.add_argument("-n", type=int, default=4); s.add_argument("--chars", type=int, default=600)
     s.set_defaults(fn=cmd_status)
     v = sub.add_parser("verify"); v.add_argument("key"); v.add_argument("--text", required=True)
-    v.add_argument("--since"); v.set_defaults(fn=cmd_verify)
+    v.add_argument("--since"); v.add_argument("--timeout", type=float, default=30)
+    v.add_argument("--interval", type=float, default=1); v.set_defaults(fn=cmd_verify)
     w = sub.add_parser("wait"); w.add_argument("key"); w.add_argument("--text"); w.add_argument("--since")
     w.add_argument("--timeout", type=int, default=600); w.add_argument("--interval", type=float, default=3)
     w.set_defaults(fn=cmd_wait)

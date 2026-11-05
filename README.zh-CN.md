@@ -69,6 +69,8 @@ python3 -I $C watch <ID>             # 持续输出开工、完成、中止、�
 
 `ui-send` 只用于索引中已有的会话；新建会话用 Computer use 或 `send --new`。`wait` 以匹配到的投递消息为锚，即使回合已结束也能返回；中止或抬头不符会返回非零。离线测试不代表真实 Codex 界面已经送达。
 
+`verify` 默认最多轮询 30 秒，因为发送返回后会话记录可能延迟写入。只查一次时传 `--timeout 0`。
+
 Codex 同时开多个屏上窗口时，先用 `cua-driver call list_windows '{}'` 取得目标窗口 ID，再给 `ui-tab`、`ui-switch`、`ui-send` 传 `--window-id <ID>`。无障碍查找和发送复核只针对该窗口；若选定窗口内仍有两个完全同名按钮，工具会拒绝不确定的点击。
 
 ## 环境要求

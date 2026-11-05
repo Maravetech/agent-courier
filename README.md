@@ -69,6 +69,8 @@ python3 -I $C watch <ID>             # stream start / complete / abort / waiting
 
 `ui-send` is for existing indexed sessions. Use Computer use or `send --new` to create a session. `wait` anchors to the matching delivery message, even if you start waiting after its turn has ended. A failed or mismatched reply exits nonzero. The offline tests do not prove real Codex UI delivery.
 
+`verify` polls for up to 30 seconds by default because the session log may lag after Send returns. Use `--timeout 0` for a single immediate check.
+
 When Codex has multiple on-screen windows, pass `--window-id <ID>` to `ui-tab`, `ui-switch`, and `ui-send` (obtain the ID from `cua-driver call list_windows '{}'`). The helper restricts AX lookup and send checks to that window; if the same exact title still appears twice inside that window, it refuses the ambiguous click.
 
 ## Requirements

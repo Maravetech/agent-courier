@@ -25,7 +25,7 @@ First time? Go through [`PREREQUISITES.md`](PREREQUISITES.md) and run its self-c
 | `find <number or title>` | List matching sessions: ID, title, log path | 0 / 1 none |
 | `locate --text <snippet> --since <time>` | Find a session by message text (use after creating a new session in the UI) | 0 / 1 none |
 | `status <ID>` | Is a turn running, plus the last few messages | 0 / 1 / 2 ambiguous |
-| `verify <ID> --text <snippet> --since <time>` | Delivery proof: the user message is in the log | 0 delivered / 1 not |
+| `verify <ID> --text <snippet> --since <time> [--timeout 30]` | Poll for delivery proof in the log (default 30 seconds; `--timeout 0` checks once) | 0 delivered / 1 not |
 | `wait <ID> --text <unique delivery snippet>` | Wait for the first turn end after that delivery; check the reply header | 0 verified / 1 failed / 2 ambiguous / 3 timeout |
 | `watch <ID> [<ID> …] --since <time>` | One-shot wake when any listed session ends a turn | 0 ended / 3 timeout |
 | `watch <ID> --stream` | Continuously print start, complete, abort, and approval-wait changes | 0 on bounded timeout |

@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import time
 import sys
 import tempfile
 import unittest
@@ -91,8 +92,18 @@ class CourierTest(unittest.TestCase):
 
     def test_verify(self):
         self.assertEqual(self.run_cli("verify", TID, "--text", "marker-42")[0], 0)
-        self.assertEqual(self.run_cli("verify", TID, "--text", "marker-42", "--since", "2026-01-03T00:00:00Z")[0], 1)
-        self.assertEqual(self.run_cli("verify", TID, "--text", "ignored")[0], 1)  # environment context is not a user message
+        self.assertEqual(self.run_cli("verify", TID, "--text", "marker-42", "--since", "2026-01-03T00:00:00Z", "--timeout", "0")[0], 1)
+        self.assertEqual(self.run_cli("verify", TID, "--text", "ignored", "--timeout", "0")[0], 1)  # environment context is not a user message
+
+    def test_verify_polls_until_delayed_delivery_appears(self):
+        proc = subprocess.Popen([sys.executable, '-I', SCRIPT, 'verify', TID, '--text', 'delayed-marker', '--timeout', '2', '--interval', '0.05'],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self.env)
+        time.sleep(0.2)
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(msg('2026-01-02T00:00:04.000Z', 'user', 'delayed-marker') + '\n')
+        out, err = proc.communicate(timeout=3)
+        self.assertEqual(proc.returncode, 0, out + err)
 
     def test_wait_and_reply_header(self):
         code, out = self.run_cli("wait", TID, "--text", "marker-42", "--timeout", "2")
