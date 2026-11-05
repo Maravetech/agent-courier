@@ -338,7 +338,9 @@ def cmd_wait(a):
                 return 1
             f_tok, t_tok = parse_header(sent[0][2])
             expected_target = token(APP_TOKEN[APP], session_number(d.get("thread_name"), d["id"]))
-            if t_tok != expected_target and not (t_tok == token(APP_TOKEN[APP], "新建") and d.get("thread_name") == "(索引里没有)"):
+            new_session_delivery = (APP == "codex" and t_tok == token("Codex", "新建")
+                                    and first_real_user(path) == sent[0][2])
+            if t_tok != expected_target and not new_session_delivery:
                 print(f"投递收件令牌与目标会话不符：{t_tok} != {expected_target}", file=sys.stderr)
                 return 1
             want = reply_line(f_tok, t_tok)
@@ -403,6 +405,17 @@ def delivery_turn(path, text):
                 done = (ts, p["type"])
                 running = False
     return anchors, replies, done, running
+
+
+def first_real_user(path):
+    """Read only the first real Codex user message, excluding injected context records."""
+    for row in events(path):
+        payload = row.get("payload") or {}
+        if row.get("type") == "response_item" and payload.get("type") == "message" and payload.get("role") == "user":
+            value = text_of(payload)
+            if is_real_user(value):
+                return value
+    return None
 
 
 def legacy_turn(path, since):

@@ -152,6 +152,16 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn('其他用户消息', out)
 
+    def test_wait_accepts_initial_cli_new_delivery_after_auto_title(self):
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        raw = Path(path).read_text(encoding='utf-8').replace('Codex·00159', 'Codex·新建')
+        Path(path).write_text(raw, encoding='utf-8')
+        index = os.path.join(self.tmp.name, 'session_index.jsonl')
+        with open(index, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'id': TID, 'thread_name': 'auto generated title'}) + '\n')
+        code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '1')
+        self.assertEqual(code, 0, out)
+
     def test_watch_emits_only_status_transitions(self):
         path = glob.glob(os.path.join(self.tmp.name, "sessions", "*", "*", "*", "rollout-*.jsonl"))[0]
         with open(path, "a", encoding="utf-8") as f:
@@ -282,6 +292,12 @@ class CourierTest(unittest.TestCase):
             self.assertIn('--session-id <ID>', doc)
             self.assertIn('wait <ID> --text', doc)
             self.assertIn('watch <ID>', doc)
+
+    def test_docs_explain_cli_new_cannot_assign_numbered_app_title(self):
+        english = Path(os.path.join(os.path.dirname(__file__), '..', 'README.md')).read_text(encoding='utf-8')
+        chinese = Path(os.path.join(os.path.dirname(__file__), '..', 'README.zh-CN.md')).read_text(encoding='utf-8')
+        self.assertIn('does not set the Codex App title', english)
+        self.assertIn('不会设置 Codex App 会话标题', chinese)
 
 
 CID = "aaaaaaaa-1111-4222-8333-444444444444"

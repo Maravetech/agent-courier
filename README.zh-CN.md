@@ -71,6 +71,8 @@ python3 -I $C watch <ID>             # 持续输出开工、完成、中止、�
 
 `verify` 默认最多轮询 30 秒，因为发送返回后会话记录可能延迟写入。只查一次时传 `--timeout 0`。
 
+`send --new` 不会设置 Codex App 会话标题，也不能保证侧栏标题有编号。本机 `codex-cli 0.160.0` 的 `codex exec` 没有标题参数，CLI 也没有改名命令；新会话需通过受支持的 App 会话工具或 App 界面改名，再读回核对编号。不要直接修改 `~/.codex/session_index.jsonl`。首条 `Codex·新建` 投递在 App 自动生成标题后仍可用 `wait` 核验。
+
 Codex 同时开多个屏上窗口时，先用 `cua-driver call list_windows '{}'` 取得目标窗口 ID，再给 `ui-tab`、`ui-switch`、`ui-send` 传 `--window-id <ID>`。无障碍查找和发送复核只针对该窗口；若选定窗口内仍有两个完全同名按钮，工具会拒绝不确定的点击。
 
 ## 环境要求

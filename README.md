@@ -71,6 +71,8 @@ python3 -I $C watch <ID>             # stream start / complete / abort / waiting
 
 `verify` polls for up to 30 seconds by default because the session log may lag after Send returns. Use `--timeout 0` for a single immediate check.
 
+`send --new` does not set the Codex App title or guarantee a numbered sidebar title. The installed `codex-cli 0.160.0` has no title option on `codex exec` and no CLI rename command; use a supported App session-title tool or rename the new chat in the App, then read the title back before using its number. Do not edit `~/.codex/session_index.jsonl` to rename it. The first `Codex·新建` delivery can still be verified by `wait` after the App auto-generates a title.
+
 When Codex has multiple on-screen windows, pass `--window-id <ID>` to `ui-tab`, `ui-switch`, and `ui-send` (obtain the ID from `cua-driver call list_windows '{}'`). The helper restricts AX lookup and send checks to that window; if the same exact title still appears twice inside that window, it refuses the ambiguous click.
 
 ## Requirements
