@@ -28,6 +28,8 @@ First time? Go through [`PREREQUISITES.md`](PREREQUISITES.md) and run its self-c
 | `verify <ID> --text <snippet> --since <time>` | Delivery proof: the user message is in the log | 0 delivered / 1 not |
 | `wait <ID> --since <time>` | Wait for the turn to finish; print the final reply and check its reply header | 0 / 3 timeout |
 | `ui-tab` / `ui-switch <title>` / `ui-send --file <body> --expect-tab <title>` | Fallback front end via cua-driver (accessibility only, no screenshots) | `ui-send`: 0 sent / 2 refused / 1 no send button |
+| `watch <ID> [<ID> …] --since <time>` | Block until any listed session **finishes a turn** (state returns to idle), then exit. Run it in the background: its exit wakes you | 0 a session finished / 3 timeout |
+| `--app claude <find\|status\|verify\|wait\|watch\|locate\|compose>` | Same read-only back end for **Claude desktop sessions** (`~/.claude/projects`), so Codex can check Claude's state and replies | as above |
 | `send <ID> --file <body>` or `send --new --file <body>` | CLI fallback via `codex exec` | 0 submitted / 4 session held by the app |
 
 Session numbers can repeat. **Always act on the session ID.**
@@ -88,6 +90,26 @@ Why the CLI can't be primary: while the Codex app runs, it holds the write lock 
 ### Front end with cua-driver (fallback, no screenshots)
 
 `ui-switch "<title>"` → `ui-send --file body.txt --expect-tab "<title>"`. It writes with `set_value` and presses the send button by accessibility action. It refuses when the header is missing, the tab is wrong, or the input holds a draft. Never AXPress the input box itself: that once raised Codex to the front. Buttons don't.
+
+## Two-way: Claude ⇄ Codex (send, then wake on state return)
+
+Both sides install this skill. **Writing into the other app's UI happens only in one direction: into Codex.** The way back is the state signal: when the other side's turn ends, its session goes back to idle, and the watcher wakes the sender, who then reads the reply from the log. No one types into Claude's window.
+
+| Direction | Send | Get the result |
+| --- | --- | --- |
+| Claude → Codex | Front end (Computer use, or cua-driver `ui-send`) | Run `watch <Codex ID> --since SINCE` **in the background**. When it exits, `wait` reads the reply and checks its header |
+| Codex → Claude (review, report) | Codex just replies in its own session with the reply header | Same as above: Claude's background `watch` picks it up |
+| Codex checks Claude | — | `--app claude status/wait/watch <Claude ID>` (read-only) |
+
+Claude Code: start the watcher with Bash `run_in_background: true`. The harness re-invokes you when it exits, so don't poll. Other agents: use your own background or notify mechanism, or call `watch` in the foreground with a timeout.
+
+### Loop rules (mandatory)
+
+- Act on and reply to a message only when it starts with `【投递】`. **A `【回复】` never triggers an automatic reply**: it goes back to the original sender, who decides the next step.
+- At most 5 deliveries per task and per session pair. Stop after two rounds with no progress.
+- Never deliver into a session that is running a turn (`status` not idle). Wait for it to return to idle.
+- One writer per app at a time: finish switch, write and send before anyone else touches the same window. `ui-send` checks the tab and the draft every time.
+- Anything about money, credentials, changing rules or guardrails, live services, or irreversible actions: stop both sides and ask the user.
 
 ## Follow-up loop
 

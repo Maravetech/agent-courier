@@ -119,7 +119,71 @@ class CourierTest(unittest.TestCase):
     def test_send_refuses_without_header(self):
         body = self.write("b.txt", "no header here")
         self.assertEqual(self.run_cli("send", "--new", "--file", body)[0], 2)
-        self.assertEqual(self.run_cli("ui-send", "--file", body)[0], 2)
+        self.assertEqual(self.run_cli("ui-send", "--file", body, "--expect-tab", "00159")[0], 2)
+
+
+CID = "aaaaaaaa-1111-4222-8333-444444444444"
+
+
+class ClaudeBackendTest(unittest.TestCase):
+    """Claude side is read-only: find / status / verify / wait / watch against a fake ~/.claude."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        h = self.tmp.name
+        meta = os.path.join(h, "sessions", "acct", "org")
+        os.makedirs(meta)
+        for i, (title, t) in enumerate([("0009 old title", 1), ("0009 review", 5)]):
+            with open(os.path.join(meta, f"local_{i}.json"), "w") as f:
+                json.dump({"cliSessionId": CID, "title": title, "lastActivityAt": t}, f)
+        proj = os.path.join(h, "claude", "projects", "-tmp-proj")
+        os.makedirs(proj)
+        rows = [
+            {"type": "user", "timestamp": "2026-01-02T00:00:01.000Z",
+             "message": {"role": "user", "content": "【投递】Codex·00159 → Claude Code·0009\n\nreview marker-9"}},
+            {"type": "assistant", "timestamp": "2026-01-02T00:00:02.000Z",
+             "message": {"role": "assistant", "stop_reason": "tool_use", "content": [{"type": "tool_use"}]}},
+            {"type": "user", "timestamp": "2026-01-02T00:00:03.000Z",
+             "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}},
+            {"type": "assistant", "timestamp": "2026-01-02T00:00:04.000Z",
+             "message": {"role": "assistant", "stop_reason": "end_turn",
+                         "content": [{"type": "text", "text": "【回复】Claude Code·0009 → Codex·00159\nok"}]}},
+        ]
+        with open(os.path.join(proj, f"{CID}.jsonl"), "w", encoding="utf-8") as f:
+            f.write("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+        self.env = dict(os.environ, CLAUDE_CONFIG_DIR=os.path.join(h, "claude"),
+                        COURIER_CLAUDE_SESSIONS=os.path.join(h, "sessions"), CODEX_HOME=os.path.join(h, "none"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def cli(self, *args):
+        r = subprocess.run([sys.executable, "-I", SCRIPT, "--app", "claude", *args],
+                           capture_output=True, text=True, env=self.env)
+        return r.returncode, r.stdout + r.stderr
+
+    def test_find_uses_latest_title(self):
+        code, out = self.cli("find", "0009")
+        self.assertEqual(code, 0, out)
+        self.assertIn("0009 review", out)
+
+    def test_status_verify_wait(self):
+        code, out = self.cli("status", CID)
+        self.assertIn("空闲", out)
+        self.assertEqual(self.cli("verify", CID, "--text", "marker-9")[0], 0)
+        code, out = self.cli("wait", CID, "--since", "2026-01-02T00:00:00Z", "--timeout", "2")
+        self.assertEqual(code, 0, out)
+        self.assertIn("回复抬头：✅", out)
+
+    def test_watch_returns_on_turn_end(self):
+        code, out = self.cli("watch", CID, "--since", "2026-01-02T00:00:00Z", "--timeout", "2")
+        self.assertEqual(code, 0, out)
+        self.assertIn("状态恢复", out)
+        code, _ = self.cli("watch", CID, "--since", "2026-01-03T00:00:00Z", "--timeout", "1", "--interval", "0.2")
+        self.assertEqual(code, 3)
+
+    def test_front_end_refused_for_claude(self):
+        self.assertEqual(self.cli("ui-tab")[0], 2)
 
 
 if __name__ == "__main__":

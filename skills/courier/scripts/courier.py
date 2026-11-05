@@ -33,7 +33,7 @@ CODEX = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
 INDEX = os.path.join(CODEX, "session_index.jsonl")
 
 
-def load_index():
+def codex_index():
     """会话索引：同一 ID 取最后一条（最新标题）。"""
     latest = {}
     if not os.path.exists(INDEX):
@@ -49,7 +49,7 @@ def load_index():
     return latest
 
 
-def rollout_path(thread_id):
+def codex_log(thread_id):
     hits = glob.glob(os.path.join(CODEX, "sessions", "*", "*", "*", f"rollout-*-{thread_id}.jsonl"))
     hits += glob.glob(os.path.join(CODEX, "archived_sessions", "**", f"rollout-*-{thread_id}.jsonl"), recursive=True)
     return max(hits, key=os.path.getmtime) if hits else None
@@ -101,7 +101,7 @@ def is_real_user(t):
     return bool(s) and not s.startswith("<environment_context>") and not s.startswith("<external_")
 
 
-def scan(path, since=None):
+def codex_scan(path, since=None):
     """返回 (消息列表, 回合是否在跑, 最后一次回合结束时间)。"""
     msgs, running, last_done = [], False, None
     for d in events(path):
@@ -123,6 +123,127 @@ def scan(path, since=None):
     return msgs, running, last_done
 
 
+# ---------------------------------------------------------------- Claude 后端（只读）
+#
+# Claude 桌面 App 的会话元数据：<App 数据>/claude-code-sessions/*/*/local_*.json（title、cliSessionId）；
+# 会话记录：~/.claude/projects/<项目>/<cliSessionId>.jsonl。回合结束 = assistant 的 stop_reason 为 end_turn。
+
+CLAUDE_HOME = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude"))
+CLAUDE_SESSIONS = os.path.expanduser(os.environ.get(
+    "COURIER_CLAUDE_SESSIONS", "~/Library/Application Support/Claude/claude-code-sessions"))
+
+
+def claude_index():
+    """cliSessionId → {id, thread_name}；同一会话多份元数据（多账号镜像）取最近活动的那份。"""
+    best = {}
+    for f in glob.glob(os.path.join(CLAUDE_SESSIONS, "*", "*", "local_*.json")):
+        try:
+            d = json.load(open(f, encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        cid = d.get("cliSessionId")
+        if not cid:
+            continue
+        cur = best.get(cid)
+        if cur is None or d.get("lastActivityAt", 0) > cur["_t"]:
+            best[cid] = {"id": cid, "thread_name": d.get("title") or "", "_t": d.get("lastActivityAt", 0)}
+    return best
+
+
+def claude_log(cid):
+    hits = glob.glob(os.path.join(CLAUDE_HOME, "projects", "*", f"{cid}.jsonl"))
+    return max(hits, key=os.path.getmtime) if hits else None
+
+
+def claude_text(content, role):
+    if isinstance(content, str):
+        return content
+    out = []
+    for b in content or []:
+        if isinstance(b, dict) and b.get("type") == "text":
+            out.append(b.get("text", ""))
+    return "".join(out)
+
+
+def claude_scan(path, since=None):
+    msgs, running, last_done = [], False, None
+    for d in events(path):
+        if d.get("isSidechain") or d.get("isMeta"):
+            continue
+        ts = d.get("timestamp", "")
+        m = d.get("message") or {}
+        typ = d.get("type")
+        if typ == "user":
+            c = m.get("content")
+            if isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
+                continue
+            text = claude_text(c, "user")
+            if not text.strip() or text.lstrip().startswith("<"):
+                continue
+            running = True
+            if since is None or ts >= since:
+                msgs.append((ts, "user", text))
+        elif typ == "assistant":
+            text = claude_text(m.get("content"), "assistant")
+            if m.get("stop_reason") == "end_turn":
+                running = False
+                last_done = (ts, "end_turn")
+            if text.strip() and (since is None or ts >= since):
+                msgs.append((ts, "assistant", text))
+    return msgs, running, last_done
+
+
+APP = "codex"   # 由 --app 设置：codex | claude
+APP_TOKEN = {"codex": "Codex", "claude": "Claude Code"}
+
+
+def load_index():
+    return claude_index() if APP == "claude" else codex_index()
+
+
+def rollout_path(tid):
+    return claude_log(tid) if APP == "claude" else codex_log(tid)
+
+
+def scan(path, since=None):
+    return claude_scan(path, since) if APP == "claude" else codex_scan(path, since)
+
+
+def all_logs():
+    if APP == "claude":
+        return glob.glob(os.path.join(CLAUDE_HOME, "projects", "*", "*.jsonl"))
+    files = glob.glob(os.path.join(CODEX, "sessions", "*", "*", "*", "rollout-*.jsonl"))
+    return files + glob.glob(os.path.join(CODEX, "archived_sessions", "**", "rollout-*.jsonl"), recursive=True)
+
+
+def log_id(path):
+    base = os.path.basename(path)[:-6]
+    return base if APP == "claude" else base.split("-", 6)[-1]
+
+
+def cmd_watch(a):
+    """后台盯多个会话：任一会话在 since 之后结束一个回合就退出（状态恢复 = 回合结束）。
+
+    设计给发送方放到后台跑：退出即唤醒发送方，再用 wait/status 读回复。
+    """
+    targets = [one(k) for k in a.keys]
+    deadline = time.time() + a.timeout
+    while True:
+        for d, path in targets:
+            msgs, running, last_done = scan(path, a.since)
+            if last_done and last_done[0] >= a.since and not running:
+                replies = [m for m in msgs if m[1] == "assistant"]
+                tail = replies[-1][2].strip().splitlines()[0][:80] if replies else "（无回复文本）"
+                print(f"状态恢复：{d.get('thread_name')}（{d['id']}）回合结束 @ {last_done[0]}")
+                print(f"首行：{tail}")
+                print(f"下一步：python3 -I {os.path.realpath(__file__)} --app {APP} wait {d['id']} --since {a.since}")
+                return 0
+        if time.time() > deadline:
+            print(f"等待超时（{a.timeout}s）：{len(targets)} 个会话都还没结束回合")
+            return 3
+        time.sleep(a.interval)
+
+
 def cmd_find(a):
     hits = resolve(a.key)
     if not hits:
@@ -135,8 +256,7 @@ def cmd_find(a):
 
 def cmd_locate(a):
     """按正文片段反查会话：前端新建会话后还不知道 ID 时用。只读，所有会话（含归档）都能查。"""
-    files = glob.glob(os.path.join(CODEX, "sessions", "*", "*", "*", "rollout-*.jsonl"))
-    files += glob.glob(os.path.join(CODEX, "archived_sessions", "**", "rollout-*.jsonl"), recursive=True)
+    files = all_logs()
     cutoff = time.time() - a.hours * 3600
     idx = load_index()
     found = 0
@@ -145,7 +265,7 @@ def cmd_locate(a):
             continue
         msgs, _, _ = scan(path, a.since)
         if any(r == "user" and a.text in t for _, r, t in msgs):
-            tid = os.path.basename(path)[:-6].split("-", 6)[-1]
+            tid = log_id(path)
             print(f"{tid}\t{(idx.get(tid) or {}).get('thread_name', '(索引暂无标题)')}\t{path}")
             found += 1
     if not found:
@@ -263,10 +383,10 @@ def cmd_compose(a):
         print("--from-session 只写发送方的 session 编号（数字，例如 0007）", file=sys.stderr)
         return 2
     if a.new:
-        to_token = token("Codex", "新建")
+        to_token = token(APP_TOKEN[APP], "新建")
     else:
         d, _ = one(a.to)
-        to_token = token("Codex", session_number(d.get("thread_name"), d["id"]))
+        to_token = token(APP_TOKEN[APP], session_number(d.get("thread_name"), d["id"]))
     body = open(a.file, encoding="utf-8").read().strip()
     if has_header(body):
         print("正文已经带了投递抬头，不要重复加", file=sys.stderr)
@@ -303,7 +423,7 @@ def cmd_send(a):
     stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     log = os.path.join(LOGDIR, f"send-{stamp}.log")
     if a.new:
-        argv = ["codex", "exec", "-s", a.sandbox, "-"]
+        argv = ["codex", "exec", "--skip-git-repo-check", "-s", a.sandbox, "-"]
         tid = None
     else:
         if not a.key:
@@ -341,6 +461,7 @@ def cmd_send(a):
 # 全程前台不变。唯一抢过焦点的是 AXPress 输入框本身 —— 本实现从不点输入框。
 
 CODEX_BUNDLE = "com.openai.codex"
+STOP_LABELS = tuple(x for x in os.environ.get("COURIER_STOP_LABELS", "停止,Stop,停止する,Stopp,Arrêter,Detener").split(",") if x)
 SEND_LABELS = tuple(x for x in os.environ.get("COURIER_SEND_LABELS", "发送,Send,送信,Senden,Envoyer,Enviar").split(",") if x)
 
 
@@ -422,21 +543,27 @@ def cmd_ui_send(a):
         return 2
     pid, wid = cua_target()
     tab = cua_tab(pid, wid)
-    if a.expect_tab and (not tab or a.expect_tab not in tab):
+    if not tab or a.expect_tab not in tab:
         print(f"拒发：当前标签页是「{tab}」，不是「{a.expect_tab}」。先 ui-switch。")
         return 2
     before = cua_front()
+    for lab in STOP_LABELS:  # 界面有「停止」按钮 = 目标会话正在跑回合：不写入、不插话
+        if re.search(r'\] AXButton "' + re.escape(lab) + '"', cua_tree(pid, wid, lab)):
+            print(f"拒发：目标会话正在运行回合（界面有「{lab}」按钮）。先 watch 等它状态恢复。")
+            return 2
     idx, placeholder, value = cua_textarea(pid, wid)
-    if value.strip() and value.strip() != placeholder.strip():
+    # 上次写入后没发出去，重试时不算草稿。AX 树把多行值渲染到后续行，只比较第一行（投递抬头）
+    mine = value.strip().splitlines()[0].strip() == body.strip().splitlines()[0].strip() if value.strip() else False
+    if value.strip() and value.strip() != placeholder.strip() and not mine:
         print(f"拒发：输入框里有草稿「{value[:40]}」，不覆盖。")
         return 2
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    cua("set_value", {"pid": pid, "window_id": wid, "element_index": idx, "value": body})
-    time.sleep(0.4)
-    tree = cua_tree(pid, wid, "AXButton")
+    if not mine:
+        cua("set_value", {"pid": pid, "window_id": wid, "element_index": idx, "value": body})
+        time.sleep(0.4)
     btn = None
-    for lab in SEND_LABELS:
-        m = re.search(r'\[(\d+)\] AXButton "' + re.escape(lab) + '"', tree)
+    for lab in SEND_LABELS:  # 按按钮文字单独查：查全部按钮会被截断
+        m = re.search(r'\[(\d+)\] AXButton "' + re.escape(lab) + '"', cua_tree(pid, wid, lab))
         if m:
             btn = int(m.group(1))
             break
@@ -451,7 +578,12 @@ def cmd_ui_send(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--app", choices=["codex", "claude"], default="codex",
+                    help="读哪个 App 的会话：codex（默认）或 claude（只读后端）")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    wa = sub.add_parser("watch"); wa.add_argument("keys", nargs="+"); wa.add_argument("--since", required=True)
+    wa.add_argument("--timeout", type=int, default=3600); wa.add_argument("--interval", type=float, default=5)
+    wa.set_defaults(fn=cmd_watch)
     f = sub.add_parser("find"); f.add_argument("key"); f.set_defaults(fn=cmd_find)
     s = sub.add_parser("status"); s.add_argument("key")
     s.add_argument("-n", type=int, default=4); s.add_argument("--chars", type=int, default=600)
@@ -468,13 +600,18 @@ def main():
     lo.add_argument("--hours", type=float, default=24); lo.set_defaults(fn=cmd_locate)
     sub.add_parser("ui-tab").set_defaults(fn=cmd_ui_tab)
     us = sub.add_parser("ui-switch"); us.add_argument("title"); us.set_defaults(fn=cmd_ui_switch)
-    ud = sub.add_parser("ui-send"); ud.add_argument("--file", required=True); ud.add_argument("--expect-tab")
+    ud = sub.add_parser("ui-send"); ud.add_argument("--file", required=True); ud.add_argument("--expect-tab", required=True)
     ud.set_defaults(fn=cmd_ui_send)
     n = sub.add_parser("send"); n.add_argument("key", nargs="?"); n.add_argument("--file", required=True)
     n.add_argument("--new", action="store_true"); n.add_argument("--cwd")
     n.add_argument("--sandbox", default="workspace-write", choices=["read-only", "workspace-write"])
     n.set_defaults(fn=cmd_send)
     a = ap.parse_args()
+    global APP
+    APP = a.app
+    if APP == "claude" and a.cmd in ("send", "ui-send", "ui-switch", "ui-tab"):
+        print("Claude 会话只支持只读后端（find/locate/status/verify/wait/watch/compose）；前端写入只面向 Codex。", file=sys.stderr)
+        sys.exit(2)
     sys.exit(a.fn(a))
 
 
