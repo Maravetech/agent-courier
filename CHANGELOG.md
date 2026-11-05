@@ -1,0 +1,8 @@
+# Changelog
+
+## 0.1.0
+
+- Front-end delivery into any Codex app session via Claude Computer use (background) or cua-driver accessibility calls.
+- Back-end delivery proof and reply reading from `~/.codex` logs, including archived sessions.
+- Identity tokens for messages and replies; draft protection; tab check.
+- CLI fallback via `codex exec`.

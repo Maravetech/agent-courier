@@ -1,0 +1,13 @@
+{
+  "name": "courier-marketplace",
+  "owner": {
+    "name": "marave"
+  },
+  "plugins": [
+    {
+      "name": "agent-courier",
+      "source": "./"
+    }
+  ],
+  "description": "Courier (投递): background delivery into Codex desktop-app sessions with log-based confirmation."
+}

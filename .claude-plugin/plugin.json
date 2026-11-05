@@ -1,0 +1,11 @@
+{
+  "name": "agent-courier",
+  "displayName": "Courier (投递)",
+  "version": "0.1.0",
+  "description": "Deliver messages into Codex desktop-app sessions in the background without stealing focus, confirm delivery from the session log, and continue the task from the reply.",
+  "author": { "name": "marave" },
+  "homepage": "https://github.com/Maravetech/agent-courier",
+  "repository": "https://github.com/Maravetech/agent-courier",
+  "license": "MIT",
+  "keywords": ["codex", "computer-use", "accessibility", "agents", "delivery", "macos"]
+}
