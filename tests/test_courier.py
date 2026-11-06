@@ -920,6 +920,16 @@ class SwiftAXFixtureTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertFalse(result['sidebar_restored'])
 
+    def test_restore_must_preserve_target_tab(self):
+        old = {'window': '00172 current', 'toolbars': 1, 'staticTexts': ['00172 current'],
+               'radios': [], 'areas': 1, 'targets': 0, 'recent': 1, 'recentExpanded': False}
+        expanded = dict(old, targets=1, recentExpanded=True)
+        switched = dict(expanded, window='00174 test', staticTexts=['00174 test'])
+        restored_wrong_tab = dict(old, recentExpanded=False)
+        code, result = self.fixture('sidebar', [old, expanded, switched, restored_wrong_tab], '00174 test')
+        self.assertEqual(code, 2)
+        self.assertTrue(result['sidebar_restored'])
+
 
 if __name__ == "__main__":
     unittest.main()

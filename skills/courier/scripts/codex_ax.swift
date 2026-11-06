@@ -54,9 +54,11 @@ if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "fixture" {
             let expandedOK = expanded["recentExpanded"] as? Bool == true && fixtureModel(expanded).2 > 0
             let switchedOK = fixtureModel(switched).0 == target
             let restoredOK = restored["recentExpanded"] as? Bool == false
-            answer = ["ok": expandedOK && switchedOK && restoredOK,
+            let finalTabOK = fixtureModel(restored).0 == target
+            answer = ["ok": expandedOK && switchedOK && restoredOK && finalTabOK,
                       "sidebar_restored": restoredOK,
-                      "reason": restoredOK ? "" : "侧栏状态未还原；拒发"]
+                      "reason": !restoredOK ? "侧栏状态未还原；拒发" :
+                          (finalTabOK ? "" : "侧栏恢复后目标标签页已变化")]
         }
     }
     let encoded = try! JSONSerialization.data(withJSONObject: answer, options: [.sortedKeys])
@@ -212,6 +214,12 @@ if action == "switch" {
                   "sidebar_restored": false, "front_before": before, "front_after": front()], 2)
         }
         if success {
+            let final = snapshot()
+            if tab(final) != title || final.areas.count != 1 || front() != before {
+                emit(["ok": false, "reason": "侧栏恢复后目标标签页已变化",
+                      "actual_tab": tab(final) ?? "无法判定", "sidebar_restored": true,
+                      "front_before": before, "front_after": front()], 2)
+            }
             emit(["ok": true, "tab": actual, "sidebar_restored": true,
                   "front_before": before, "front_after": front()])
         }
