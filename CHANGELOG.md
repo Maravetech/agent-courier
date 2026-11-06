@@ -2,10 +2,9 @@
 
 ## 0.4.0
 
-- Optional macOS bird overlay anchors 2 pt before Claude or Codex sidebar conversation numbers through Accessibility. Each visible pair has two rings, one straight line, a three-frame bird that flies for 2.5 seconds, and restrained CoreGraphics particles. The resident SkyLight renderer uses small click-through windows and no AppKit; it draws its own icon and opens a separate AppKit pair panel on demand. The ten most recently active pairs display, while the panel lists all pairs and lets users connect or disconnect existing pairs. A disconnected pair blocks delivery with exit code 5. The renderer exits after the last pair disappears. Signed installation, physical icon click, and Launch at Login registration remain unverified.
+- Optional macOS bird overlay anchors 2 pt before Claude or Codex sidebar conversation numbers through Accessibility. Each visible pair has two rings, one dashed line, and a transparent bird drawn from Swift vector rectangles. The bird flies for 2.5 seconds with two wing poses and Core Animation particles. Up to ten simultaneous pairs receive distinct line, ring, and bird colors; disconnected birds are gray. The resident SkyLight/Core Animation renderer does not link AppKit; it draws its own icon and opens a separate AppKit pair panel on demand. A disconnected pair blocks delivery with exit code 5. The renderer exits after the last pair disappears. Signed installation, physical icon click, and Launch at Login registration remain unverified.
 - `overlay pair` supports Computer use deliveries; `ui-send`, `verify`, `wait`, and `watch` update the visual state automatically. `COURIER_OVERLAY=0` disables it.
-- Per-app AX rules, visible-row filtering, duplicate-frame selection, and `locate.log` track anchors. A test-only focus probe records the overlay's PID, foreground app, and key-window state.
-- Use the shared brand bird icon from the local 0.2.2 icon update; the remote release was already 0.3.0 when this feature branch was started.
+- Per-app AX rules, visible-row filtering, duplicate-frame selection, and `locate.log` track anchors. Isolated tests record the overlay PID and foreground app; key-window and physical click-through acceptance remain pending.
 
 ## 0.3.0
 

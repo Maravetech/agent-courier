@@ -4,16 +4,6 @@ import CoreGraphics
 import Darwin
 import SQLite3
 
-@_silgen_name("courier_sl_init") private func slInit() -> UnsafePointer<CChar>?
-@_silgen_name("courier_sl_create") private func slCreate(_ x: Double, _ y: Double, _ w: Double, _ h: Double, _ scale: Double, _ interactive: Int32) -> UnsafeMutableRawPointer?
-@_silgen_name("courier_sl_destroy") private func slDestroy(_ window: UnsafeMutableRawPointer?)
-@_silgen_name("courier_sl_move") private func slMove(_ window: UnsafeMutableRawPointer?, _ x: Double, _ y: Double) -> Int32
-@_silgen_name("courier_sl_line_transform") private func slTransform(_ window: UnsafeMutableRawPointer?, _ x: Double, _ y: Double, _ angle: Double) -> Int32
-@_silgen_name("courier_sl_ring") private func slRing(_ window: UnsafeMutableRawPointer?, _ r: Double, _ g: Double, _ b: Double)
-@_silgen_name("courier_sl_line") private func slLine(_ window: UnsafeMutableRawPointer?, _ r: Double, _ g: Double, _ b: Double)
-@_silgen_name("courier_sl_load_bird") private func slLoadBird(_ index: Int32, _ path: UnsafePointer<CChar>) -> Int32
-@_silgen_name("courier_sl_bird") private func slBird(_ window: UnsafeMutableRawPointer?, _ frame: Int32, _ left: Int32, _ r: Double, _ g: Double, _ b: Double, _ particles: Int32, _ phase: Double)
-
 private struct Point: Codable { let x: Double; let y: Double }
 private struct Pair: Codable {
     let from_app: String, to_app: String, from: String, to: String, state: String
@@ -28,14 +18,6 @@ private struct Pair: Codable {
     }
 }
 private struct Snapshot: Codable { let pairs: [Pair] }
-private struct RGB { let r: Double, g: Double, b: Double }
-private func tint(_ pair: Pair) -> RGB {
-    let hash = (pair.from + ":" + pair.to).utf8.reduce(UInt32(2166136261)) { ($0 ^ UInt32($1)) &* 16777619 }
-    let h = Double(hash % 360) / 60, x = 0.72 * (1 - abs(h.truncatingRemainder(dividingBy: 2) - 1))
-    let c = 0.72, m = 0.18
-    let values: (Double, Double, Double) = h < 1 ? (c,x,0) : h < 2 ? (x,c,0) : h < 3 ? (0,c,x) : h < 4 ? (0,x,c) : h < 5 ? (x,0,c) : (c,0,x)
-    return RGB(r: values.0+m, g: values.1+m, b: values.2+m)
-}
 private func displayScale(_ point: Point) -> Double {
     var ids = [CGDirectDisplayID](repeating: 0, count: 32), count: UInt32 = 0
     guard CGGetActiveDisplayList(32, &ids, &count) == .success else { return 1 }
@@ -45,84 +27,20 @@ private func displayScale(_ point: Point) -> Double {
     return 1
 }
 
-private final class Render {
-    var source: Point, target: Point
-    var ringA: UnsafeMutableRawPointer?, ringB: UnsafeMutableRawPointer?
-    var line: UnsafeMutableRawPointer?, bird: UnsafeMutableRawPointer?
-    var lineLength = 0.0, lastWing = -1, lastLeft = false, lastParticle = -1, lastParticleMode = 0
-    let color: RGB
-    let reducedMotion: Bool
-    init?(_ pair: Pair, _ a: Point, _ b: Point) {
-        source = a; target = b; color = tint(pair)
-        reducedMotion = UserDefaults(suiteName: "com.apple.universalaccess")?.bool(forKey: "reduceMotion") ?? false
-        let scaleA = displayScale(a), scaleB = displayScale(b)
-        ringA = slCreate(a.x-22, a.y-22, 44, 44, scaleA, 0)
-        ringB = slCreate(b.x-22, b.y-22, 44, 44, scaleB, 0)
-        bird = slCreate(a.x-32, a.y-32, 64, 64, scaleA, 0)
-        guard ringA != nil, ringB != nil, bird != nil else { destroy(); return nil }
-        slRing(ringA, color.r, color.g, color.b); slRing(ringB, color.r, color.g, color.b)
-        setLine(a, b)
-        slBird(bird, 0, 0, color.r, color.g, color.b, 0, 0)
-    }
-    deinit { destroy() }
-    private func destroy() {
-        for window in [ringA, ringB, line, bird] { slDestroy(window) }
-        ringA = nil; ringB = nil; line = nil; bird = nil
-    }
-    private func setLine(_ a: Point, _ b: Point) {
-        let length = hypot(b.x-a.x, b.y-a.y)
-        guard length > 1 else { slDestroy(line); line = nil; return }
-        if line == nil || abs(lineLength-length) > 1 {
-            slDestroy(line); lineLength = length
-            line = slCreate(0, 0, length, 6, max(displayScale(a), displayScale(b)), 0)
-            slLine(line, color.r, color.g, color.b)
-        }
-        let angle = atan2(b.y-a.y, b.x-a.x)
-        let x = a.x + sin(angle)*3, y = a.y - cos(angle)*3
-        _ = slTransform(line, x, y, angle)
-    }
-    func follow(_ a: Point, _ b: Point) {
-        guard source.x != a.x || source.y != a.y || target.x != b.x || target.y != b.y else { return }
-        source = a; target = b
-        _ = slMove(ringA, a.x-22, a.y-22); _ = slMove(ringB, b.x-22, b.y-22)
-        setLine(a, b)
-    }
-    func place(_ pair: Pair, now: Double, wing: Bool = false) -> Bool {
-        let returning = ["replied", "error", "wrong_header", "stuck", "archived_target"].contains(pair.state)
-        let outbound = ["sending", "delivered", "working"].contains(pair.state)
-        let age = max(0, now - (pair.motion_at ?? pair.updated_at))
-        let moving = (returning || outbound) && age < 2.5
-        let landing = (returning || outbound) && age >= 2.5 && age < 3.1
-        let t = min(1, age/2.5), eased = t*t*(3-2*t)
-        let fraction = moving ? (returning ? 1-eased : eased) : returning || ["idle", "pending"].contains(pair.state) ? 0 : 1
-        let x = source.x + (target.x-source.x)*fraction, y = source.y + (target.y-source.y)*fraction
-        _ = slMove(bird, x-32, y-32)
-        let tick = Int((age*6).rounded(.down))
-        let frame = moving ? tick % 3 : wing && pair.state == "working" ? 1 : 0
-        let particles = reducedMotion ? 0 :
-            pair.state == "error" || pair.state == "stuck" ? (moving ? 3 : 0) : moving ? 1 : landing ? 2 : 0
-        if frame != lastWing || returning != lastLeft || particles != lastParticleMode || (particles != 0 && tick != lastParticle) {
-            slBird(bird, Int32(frame), returning ? 1 : 0, color.r, color.g, color.b, Int32(particles), landing ? age-2.5 : age)
-            lastWing = frame; lastLeft = returning
-            lastParticle = tick; lastParticleMode = particles
-        }
-        return moving || landing
-    }
-}
-
 private final class Overlay {
     private let stateURL: URL, folder: URL, locator: SidebarLocator
     private var fileSource: DispatchSourceFileSystemObject?
-    private var flightTimer: Timer?, wingTimer: Timer?, maintenanceTimer: Timer?
-    private var renders: [String: Render] = [:]
-    private var pairs: [Pair] = []
+    private var maintenanceTimer: Timer?
+    private let renderer = CAOverlayRenderer(scale: { point in displayScale(Point(x: point.x, y: point.y)) })
+    private var iconVisible = false
     private var lastData = Data()
+    private var lastConfig = Data(), lastLinks = Data()
     private var lastLocate = 0.0
     private var exitGeneration = 0
     private let fixture = ProcessInfo.processInfo.environment["COURIER_OVERLAY_FIXTURE"] == "1"
+    private let visualProbe = ProcessInfo.processInfo.environment["COURIER_OVERLAY_VISUAL_PROBE"] == "1"
     private var rolloutSources: [String: DispatchSourceFileSystemObject] = [:]
     private var rolloutActivity: [String: Double] = [:]
-    private var icon: UnsafeMutableRawPointer?
     private var iconRect = CGRect.zero
     private var clickTap: CFMachPort?
     private var panelProcess: Process?
@@ -135,11 +53,7 @@ private final class Overlay {
         guard instanceLock >= 0, flock(instanceLock, LOCK_EX | LOCK_NB) == 0 else {
             log("duplicate_instance_rejected"); return
         }
-        if let error = slInit() { log("private_symbol_missing: \(String(cString: error))"); return }
-        for index in 0..<3 {
-            guard let path = Bundle.main.url(forResource: "bird-\(index)", withExtension: "png"),
-                  path.path.withCString({ slLoadBird(Int32(index), $0) }) == 0 else { log("bird_asset_missing: \(index)"); return }
-        }
+        if let error = caInit() { log("private_symbol_missing: \(String(cString: error))"); return }
         locator.observeChanges { [weak self] in self?.reload(force: true) }
         if !fixture { setupClickTap() }
         let fd = Darwin.open(folder.path, O_EVTONLY)
@@ -175,7 +89,7 @@ private final class Overlay {
                                     eventsOfInterest: mask, callback: { _, type, event, context in
             guard let context else { return Unmanaged.passUnretained(event) }
             let overlay = Unmanaged<Overlay>.fromOpaque(context).takeUnretainedValue()
-            if overlay.icon != nil && overlay.iconRect.contains(event.location) {
+            if overlay.iconVisible && overlay.iconRect.contains(event.location) {
                 if type == .leftMouseDown { overlay.openPanel() }
                 return nil
             }
@@ -195,13 +109,11 @@ private final class Overlay {
         do { try process.run(); panelProcess = process } catch { log("menu_panel_failed: \(error.localizedDescription)") }
     }
     private func updateIcon(_ present: Bool) {
-        if !present { slDestroy(icon); icon = nil; return }
-        if icon == nil {
+        iconVisible = present
+        if present && iconRect == .zero {
             let screen = CGDisplayBounds(CGMainDisplayID())
             iconRect = CGRect(x: min(screen.maxX-200, screen.midX+180), y: screen.minY+2, width: 28, height: 24)
-            icon = slCreate(iconRect.minX, iconRect.minY, 28, 24, displayScale(Point(x: iconRect.midX, y: iconRect.midY)), 0)
         }
-        slBird(icon, 0, 0, enabled ? 0.16 : 0.45, enabled ? 0.48 : 0.45, enabled ? 0.72 : 0.45, 0, 0)
     }
     private func reload(force: Bool = false) {
         let quit = folder.appendingPathComponent("quit")
@@ -210,9 +122,11 @@ private final class Overlay {
             exit(0)
         }
         let data = (try? Data(contentsOf: stateURL)) ?? Data()
+        let config = (try? Data(contentsOf: folder.appendingPathComponent("config.json"))) ?? Data()
+        let links = (try? Data(contentsOf: folder.appendingPathComponent("links.json"))) ?? Data()
         let now = Date().timeIntervalSince1970
-        guard force || data != lastData || now-lastLocate >= 1 else { return }
-        lastData = data; lastLocate = now
+        guard force || data != lastData || config != lastConfig || links != lastLinks || now-lastLocate >= 1 else { return }
+        lastData = data; lastConfig = config; lastLinks = links; lastLocate = now
         let all = (try? JSONDecoder().decode(Snapshot.self, from: data))?.pairs ?? []
         updateIcon(!all.isEmpty)
         exitGeneration += 1
@@ -224,55 +138,29 @@ private final class Overlay {
                 exit(0)
             }
         }
-        watchRollouts(all)
-        let selected = enabled ? Array(all.filter { !disconnected.contains($0.key) && $0.state != "archived_source" }
+        if !visualProbe { watchRollouts(all) }
+        let disconnectedKeys = disconnected
+        let selected = enabled ? Array(all.filter { $0.state != "archived_source" }
             .sorted { $0.updated_at > $1.updated_at }.prefix(10)) : []
-        var current: [String: Render] = [:], sourceOffsets: [String: Int] = [:]
+        var entries: [CAEntry] = [], sourceOffsets: [String: Int] = [:]
         for pair in selected {
             let a = fixture ? pair.source.map { CGPoint(x: $0.x, y: $0.y) } : locator.locate(app: pair.from_app, number: pair.from)
             let b = fixture ? pair.target.map { CGPoint(x: $0.x, y: $0.y) } : locator.locate(app: pair.to_app, number: pair.to)
             guard let a, let b else { continue }
             let sender = "\(pair.from_app)·\(pair.from)"
             let offset = sourceOffsets[sender, default: 0]; sourceOffsets[sender] = offset+1
-            let source = Point(x: a.x-Double(offset)*18, y: a.y), target = Point(x: b.x, y: b.y)
-            let render = renders.removeValue(forKey: pair.key) ?? Render(pair, source, target)
-            render?.follow(source, target)
-            if let render { current[pair.key] = render }
+            entries.append(CAEntry(key: pair.key,
+                source: CGPoint(x: a.x-Double(offset)*9, y: a.y), target: b,
+                state: pair.state, motionAt: pair.motion_at ?? pair.updated_at,
+                disconnected: disconnectedKeys.contains(pair.key)))
         }
-        renders = current; pairs = selected
-        if renders.isEmpty { _ = malloc_zone_pressure_relief(nil, 0) }
+        if !renderer.update(entries, iconRect: iconVisible ? iconRect : nil, enabled: enabled) {
+            iconVisible = false; log("ca_renderer_unavailable")
+        }
         if all.isEmpty { maintenanceTimer?.invalidate(); maintenanceTimer = nil }
-        else if maintenanceTimer == nil {
+        else if maintenanceTimer == nil && !visualProbe {
             maintenanceTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in self?.maintenanceTick() }
         }
-        updateAnimation(now)
-    }
-    private func updateAnimation(_ now: Double) {
-        var flying = false, working = false
-        for pair in pairs {
-            if let render = renders[pair.key] { flying = render.place(pair, now: now) || flying }
-            if pair.state == "working" { working = true }
-        }
-        if flying && flightTimer == nil {
-            flightTimer = Timer.scheduledTimer(withTimeInterval: 1.0/60, repeats: true) { [weak self] _ in
-                guard let self else { return }
-                let now = Date().timeIntervalSince1970
-                var active = false
-                for pair in self.pairs { if let render = self.renders[pair.key] { active = render.place(pair, now: now) || active } }
-                if !active { self.flightTimer?.invalidate(); self.flightTimer = nil }
-            }
-        } else if !flying { flightTimer?.invalidate(); flightTimer = nil }
-        if working && wingTimer == nil {
-            wingTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-                guard let self else { return }
-                let now = Date().timeIntervalSince1970
-                for pair in self.pairs where pair.state == "working" { _ = self.renders[pair.key]?.place(pair, now: now, wing: true) }
-                DispatchQueue.main.asyncAfter(deadline: .now()+0.16) { [weak self] in
-                    guard let self else { return }
-                    for pair in self.pairs where pair.state == "working" { _ = self.renders[pair.key]?.place(pair, now: Date().timeIntervalSince1970) }
-                }
-            }
-        } else if !working { wingTimer?.invalidate(); wingTimer = nil }
     }
     private var codexHome: URL {
         URL(fileURLWithPath: ((ProcessInfo.processInfo.environment["CODEX_HOME"] ?? "~/.codex") as NSString).expandingTildeInPath)
@@ -445,6 +333,16 @@ private final class Overlay {
         let base = URL(fileURLWithPath: ((ProcessInfo.processInfo.environment["COURIER_STATE_DIR"] ?? "~/.local/state/courier") as NSString).expandingTildeInPath)
         let url = CommandLine.arguments.count > 1 ? URL(fileURLWithPath: CommandLine.arguments[1]) : base.appendingPathComponent("overlay/pairs.json")
         if CommandLine.arguments == [CommandLine.arguments[0], "--status"] { print(AXIsProcessTrusted() ? "辅助功能已授权" : "未授权辅助功能"); return }
+        if CommandLine.arguments == [CommandLine.arguments[0], "--permissions"] {
+            print("accessibility=\(AXIsProcessTrusted()) input_monitoring=\(CGPreflightListenEventAccess())")
+            return
+        }
+        if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--locate" {
+            let point = SidebarLocator(stateDirectory: base.appendingPathComponent("overlay"))
+                .locate(app: CommandLine.arguments[2], number: CommandLine.arguments[3])
+            print(point.map { "x=\($0.x) y=\($0.y)" } ?? "not_visible")
+            return
+        }
         Overlay(url).start()
     }
 }

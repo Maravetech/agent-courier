@@ -65,7 +65,8 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         toggle.state = enabled(config) ? .on : .off; stack.addArrangedSubview(toggle)
         let list = pairs(state).sorted { $0.updated_at > $1.updated_at }
         let hidden = disconnected(links)
-        let visible = Set(list.filter { !hidden.contains($0.key) }.prefix(10).map(\.key))
+        let visible = Set(list.prefix(10).map(\.key))
+        let slots = PairPalette.slots(for: Array(visible))
         let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = false
         let rows = NSStackView(); rows.orientation = .vertical; rows.alignment = .leading; rows.spacing = 5
         rows.frame = NSRect(x: 0, y: 0, width: 410, height: max(36, CGFloat(list.count)*38))
@@ -77,8 +78,7 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for pair in list {
             let row = NSStackView(); row.orientation = .horizontal; row.spacing = 6
             let dot = NSTextField(labelWithString: "●")
-            let hash = (pair.from+":"+pair.to).utf8.reduce(UInt32(2166136261)) { ($0 ^ UInt32($1)) &* 16777619 }
-            dot.textColor = NSColor(calibratedHue: CGFloat(hash%360)/360, saturation: 0.72, brightness: 0.9, alpha: 1)
+            dot.textColor = slots[pair.key].flatMap { NSColor(cgColor: PairPalette.color($0)) } ?? .secondaryLabelColor
             row.addArrangedSubview(dot)
             let status = hidden.contains(pair.key) ? "已断开" : visible.contains(pair.key) ? (names[pair.state] ?? pair.state) : "未显示"
             let label = NSTextField(labelWithString: "\(pair.from_app)·\(pair.from) ⇄ \(pair.to_app)·\(pair.to) · \(status)")

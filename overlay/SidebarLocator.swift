@@ -10,6 +10,7 @@ final class SidebarLocator {
         let frame: CGRect
         let clip: CGRect
         let text: CGRect?
+        let window: CGRect
     }
     private let stateDirectory: URL
     private let bundles = ["Claude Code": "com.anthropic.claudefordesktop", "Codex": "com.openai.codex"]
@@ -119,7 +120,8 @@ final class SidebarLocator {
            bounds.width > 1, bounds.height > 1 {
             let matched = app == "Codex" ? inList :
                 (inWeb && bounds.minX - window.minX <= 320 && bounds.minX >= window.minX && bounds.width <= 320)
-            if matched { found.append(Candidate(frame: bounds, clip: currentClip, text: titleFrame(element, number: number))) }
+            if matched { found.append(Candidate(frame: bounds, clip: currentClip,
+                                                text: titleFrame(element, number: number), window: window)) }
         }
         for child in children(element) {
             walk(child, pid: pid, app: app, number: number, window: window, clip: currentClip,
@@ -133,6 +135,8 @@ final class SidebarLocator {
                                           "width": $0.frame.width, "height": $0.frame.height] } ?? NSNull()
         let record: [String: Any] = ["time": Date().timeIntervalSince1970, "app": app, "number": number,
                                      "hits": hits, "selected": chosen, "text": selected?.text.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] } ?? [:],
+                                     "window": selected.map { ["x": $0.window.minX, "y": $0.window.minY,
+                                                                  "width": $0.window.width, "height": $0.window.height] } ?? [:],
                                      "anchor": anchor.map { ["x": $0.x, "y": $0.y] } ?? [:], "note": note]
         guard var data = try? JSONSerialization.data(withJSONObject: record) else { return }
         data.append(0x0A)
@@ -180,11 +184,13 @@ final class SidebarLocator {
         }.sorted { $0.frame.minY < $1.frame.minY }
         let selected = candidates.first
         let title = selected?.text
-        let left = title?.minX ?? selected.map { $0.frame.minX + (app == "Codex" ? 42 : 12) }
-        let middle = title?.midY ?? selected?.frame.midY
-        let anchor = left.flatMap { x in middle.map { CGPoint(x: x - 20, y: $0) } }
+        let desired = title.map { $0.minX - 11 }
+        let center = desired.map { max($0, (selected?.window.minX ?? 0) + 9) }
+        let clamped = center != desired
+        let anchor = center.flatMap { x in title.map { CGPoint(x: x, y: $0.midY) } }
         writeLog(app: app, number: number, hits: raw.count, selected: selected, anchor: anchor,
-                 note: candidates.count > 1 ? "multiple_visible_topmost" : selected == nil ? "not_visible" : title == nil ? "fallback_padding" : "ok")
+                 note: clamped ? "clamped_to_window" : candidates.count > 1 ? "multiple_visible_topmost" :
+                    selected == nil ? "not_visible" : title == nil ? "title_missing" : "ok")
         return anchor
     }
     private func installObserver(pid: pid_t, element: AXUIElement) {
