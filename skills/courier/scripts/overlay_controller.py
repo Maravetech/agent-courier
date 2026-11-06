@@ -160,7 +160,7 @@ def ensure_app():
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with (STATE_DIR / "app.lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        rows = subprocess.run(["/bin/ps", "-axo", "command="], capture_output=True, text=True, timeout=5).stdout.splitlines()
+        rows = subprocess.run(["/bin/ps", "-awwxo", "command="], capture_output=True, text=True, timeout=5).stdout.splitlines()
         if any(row == str(app) or row.startswith(str(app) + " ") for row in rows):
             return
         env = dict(os.environ)

@@ -981,6 +981,17 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "None")
 
+    def test_overlay_existing_app_is_not_started_twice(self):
+        app = Path(self.tmp.name, "courier-overlay")
+        app.write_text("")
+        with patch.object(overlay, "app_path", return_value=app), \
+             patch.object(overlay, "STATE_DIR", Path(self.tmp.name, "overlay")), \
+             patch.object(overlay.subprocess, "run", return_value=SimpleNamespace(stdout=f"{app} /tmp/pairs.json\n")) as run, \
+             patch.object(overlay.subprocess, "Popen") as start:
+            overlay.ensure_app()
+        self.assertIn("-awwxo", run.call_args.args[0])
+        start.assert_not_called()
+
     def test_overlay_emits_codex_to_codex(self):
         with patch.dict(os.environ, {"COURIER_OVERLAY": "1"}), patch.object(courier.subprocess, "run") as run:
             courier.overlay_emit("sending", "【投递】Codex·00159 → Codex·00160\nfixture")
