@@ -563,8 +563,8 @@ class CourierTest(unittest.TestCase):
     def test_cua_target_can_select_exact_window_when_two_are_open(self):
         apps = json.dumps({'apps': [{'pid': 42, 'bundle_id': courier.CODEX_BUNDLE, 'running': True}]})
         wins = json.dumps({'windows': [
-            {'window_id': 111, 'is_on_screen': True, 'bounds': {'height': 500}},
-            {'window_id': 222, 'is_on_screen': True, 'bounds': {'height': 500}},
+            {'pid': 42, 'window_id': 111, 'is_on_screen': True, 'layer': 0},
+            {'pid': 42, 'window_id': 222, 'is_on_screen': True, 'layer': 0},
         ]})
         with patch.object(courier, 'cua', side_effect=[apps, wins]):
             self.assertEqual(courier.cua_target(222), (42, 222))
@@ -809,16 +809,10 @@ class CourierTest(unittest.TestCase):
         self.assertIn('originating session', skill)
         self.assertIn('wait', skill)
 
-    def test_native_ax_binds_visible_window_without_reading_double_cua_tree(self):
-        windows = {'windows': [
-            {'pid': 42, 'window_id': 111, 'is_on_screen': True,
-             'bounds': {'x': 10, 'y': 20, 'width': 1000, 'height': 700}},
-            {'pid': 42, 'window_id': 222, 'is_on_screen': False,
-             'bounds': {'x': 0, 'y': 0, 'width': 960, 'height': 720}}]}
+    def test_native_ax_passes_window_id_without_cua_geometry(self):
         fake = SimpleNamespace(returncode=0, stdout=json.dumps({'ok': True, 'tab': '00159 test target'}))
         def fake_cua(tool, _args):
-            self.assertEqual(tool, 'list_windows')  # get_window_state has two AXWindow roots
-            return json.dumps(windows)
+            self.fail(f'unexpected cua call after target selection: {tool}')
         with patch.object(courier, 'cua_target', return_value=(42, 111)), \
              patch.object(courier, 'cua', side_effect=fake_cua), \
              patch.object(courier.subprocess if hasattr(courier, 'subprocess') else subprocess, 'run', return_value=fake) as run:
@@ -826,15 +820,15 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(result['tab'], '00159 test target')
         command = run.call_args.args[0]
         self.assertIn('codex_ax.swift', command[1])
-        self.assertEqual(command[5:9], ['10', '20', '1000', '700'])
+        self.assertEqual(command[4:6], ['42', '111'])
+        self.assertEqual(len(command), 7)
 
     def test_native_ax_cold_start_primes_once_then_retries(self):
-        windows = {'windows': [{'pid': 42, 'window_id': 111, 'is_on_screen': True,
-                                'bounds': {'x': 10, 'y': 20, 'width': 1000, 'height': 700}}]}
         calls = []
         def fake_cua(tool, args):
             calls.append((tool, args))
-            return json.dumps(windows if tool == 'list_windows' else {'tree_markdown': ''})
+            self.assertEqual(tool, 'get_window_state')
+            return json.dumps({'tree_markdown': ''})
         runs = [SimpleNamespace(returncode=2, stdout=json.dumps({'ok': False, 'warmup_required': True})),
                 SimpleNamespace(returncode=0, stdout=json.dumps({'ok': True, 'tab': '00174 test'}))]
         with patch.object(courier, 'cua_target', return_value=(42, 111)), \
@@ -842,8 +836,8 @@ class CourierTest(unittest.TestCase):
              patch.object(subprocess, 'run', side_effect=runs) as run:
             self.assertEqual(courier.native_ui_action('tab')['tab'], '00174 test')
         self.assertEqual(run.call_count, 2)
-        self.assertEqual([item[0] for item in calls], ['list_windows', 'get_window_state'])
-        self.assertEqual(calls[1][1]['query'], '聊天工具栏')
+        self.assertEqual([item[0] for item in calls], ['get_window_state'])
+        self.assertEqual(calls[0][1]['query'], '聊天工具栏')
 
     def test_native_tab_ignores_ambiguous_double_axwindow_tree(self):
         ambiguous = ('- [0] AXWindow "Main"\n  - [1] AXRadioButton "00159 test target"\n'
@@ -988,6 +982,36 @@ class SwiftAXFixtureTest(unittest.TestCase):
         run = subprocess.run(['swift', self.SCRIPT, 'fixture'], input=payload,
                              text=True, capture_output=True, timeout=30)
         return run.returncode, json.loads(run.stdout)
+
+    def test_geometry_fallback_requires_unique_cg_ax_match(self):
+        for x, y in ((4527, 30), (3794, 45)):
+            cg = {'x': x, 'y': y, 'width': 1000, 'height': 700}
+            other = dict(cg, x=x - 400)
+            row = {'cgBounds': cg, 'axBounds': [other, cg]}
+            self.assertEqual(self.fixture('window', [row]),
+                             (0, {'binding': 'geometry', 'matches': 1, 'ok': True}))
+            row['axBounds'] = [other]
+            self.assertEqual(self.fixture('window', [row]),
+                             (2, {'binding': 'geometry', 'matches': 0, 'ok': False}))
+            row['axBounds'] = [cg, cg]
+            self.assertEqual(self.fixture('window', [row]),
+                             (2, {'binding': 'geometry', 'matches': 2, 'ok': False}))
+
+    def test_window_id_binds_when_cg_and_ax_coordinates_disagree(self):
+        for ax_x, cg_x, ax_y, cg_y in ((4527, 2230, 30, 30), (3794, 1880, 30, 45)):
+            ax = {'x': ax_x, 'y': ax_y, 'width': 1000, 'height': 700}
+            cg = dict(ax, x=cg_x, y=cg_y)
+            row = {'windowID': 16105, 'cgBounds': cg, 'axBounds': [ax],
+                   'axWindowIDs': [16105]}
+            self.assertEqual(self.fixture('window', [row]),
+                             (0, {'binding': 'window_id', 'matches': 1, 'ok': True}))
+            row['axWindowIDs'] = [16106]
+            self.assertEqual(self.fixture('window', [row]),
+                             (2, {'binding': 'window_id', 'matches': 0, 'ok': False}))
+            row['axBounds'] = [ax, ax]
+            row['axWindowIDs'] = [16105, 16105]
+            self.assertEqual(self.fixture('window', [row]),
+                             (2, {'binding': 'window_id', 'matches': 2, 'ok': False}))
 
     def test_toolbar_title_cross_checks_window_and_old_radio_still_works(self):
         new = {'window': '00174 courier AX 投递测试', 'toolbars': 1,

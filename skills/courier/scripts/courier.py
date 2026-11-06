@@ -772,7 +772,8 @@ def cua_target(window_id=None):
     if not pid:
         raise RuntimeError("Codex App 没在运行")
     wins = json.loads(cua("list_windows", {"pid": pid}))["windows"]
-    wins = [w for w in wins if w.get("is_on_screen") and w["bounds"]["height"] > 200]
+    wins = [w for w in wins if w.get("pid") == pid and w.get("is_on_screen")
+            and w.get("layer", 0) == 0]
     if not wins:
         raise RuntimeError("Codex 没有在屏上的主窗口（最小化或在别的桌面空间）")
     if window_id is not None:
@@ -786,24 +787,15 @@ def cua_target(window_id=None):
 
 
 def native_ui_action(action, title="", body="", window_id=None):
-    """Bind a WindowServer window to the bundle's unique native AXWindow.
+    """Pass only the selected window ID to the native AX bridge.
 
-    Only window geometry comes from cua-driver. Controls and actions are all
-    resolved inside the matched AXWindow by the Swift bridge. Body uses stdin,
-    so it never appears in argv or diagnostics.
+    Swift reads the WindowServer bounds itself and binds one AXWindow. Body
+    uses stdin, so it never appears in argv or diagnostics.
     """
     import subprocess
     pid, wid = cua_target(window_id)
-    windows = json.loads(cua("list_windows", {"pid": pid}))["windows"]
-    matches = [w for w in windows if w.get("pid") == pid and w.get("window_id") == wid
-               and w.get("is_on_screen")]
-    if len(matches) != 1:
-        raise RuntimeError("屏上窗口无法唯一确认")
-    bounds = matches[0]["bounds"]
     script = os.path.join(os.path.dirname(__file__), "codex_ax.swift")
-    cmd = ["swift", script, action, title, str(pid),
-           *(str(bounds[k]) for k in ("x", "y", "width", "height")),
-           ",".join(SEND_LABELS)]
+    cmd = ["swift", script, action, title, str(pid), str(wid), ",".join(SEND_LABELS)]
     def invoke():
         run = subprocess.run(cmd, input=body, capture_output=True, text=True, timeout=45)
         try:

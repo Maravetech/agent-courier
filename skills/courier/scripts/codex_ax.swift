@@ -2,6 +2,7 @@
 // Swift, AppKit and ApplicationServices are part of macOS; no packages are needed.
 import ApplicationServices
 import AppKit
+import Darwin
 import Foundation
 
 // Pure decisions are also exercised by the offline fixture mode below.
@@ -22,6 +23,16 @@ func sidebarDecision(_ targets: Int, _ recentCount: Int, _ recentExpanded: Bool?
     if targets > 0 { return "target" }
     if recentCount == 1 && recentExpanded == false { return "expand_recent" }
     return "missing"
+}
+func sameFrame(_ left: CGRect, _ right: CGRect) -> Bool {
+    abs(left.origin.x - right.origin.x) < 2 && abs(left.origin.y - right.origin.y) < 2 &&
+    abs(left.width - right.width) < 2 && abs(left.height - right.height) < 2
+}
+func frame(_ raw: [String: Any]) -> CGRect? {
+    guard let x = raw["x"] as? Double, let y = raw["y"] as? Double,
+          let width = raw["width"] as? Double, let height = raw["height"] as? Double,
+          width > 0, height > 0 else { return nil }
+    return CGRect(x: x, y: y, width: width, height: height)
 }
 if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "fixture" {
     let data = FileHandle.standardInput.readDataToEndOfFile()
@@ -49,6 +60,21 @@ if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "fixture" {
                           "reason": mutated ? "Codex 在切页过程中到了前台；已中止" :
                               "Codex 在前台，用户可能正在使用；未切页"] :
                          ["ok": true, "foreground": false]
+    } else if mode == "window", let row = rows.first,
+              let cg = row["cgBounds"] as? [String: Any], let target = frame(cg),
+              let ax = row["axBounds"] as? [[String: Any]] {
+        let ids = row["axWindowIDs"] as? [Int]
+        let wanted = row["windowID"] as? Int
+        let byID = ids != nil && wanted != nil
+        let matches = ax.enumerated().filter { index, item in
+            if let ids = ids, let wanted = wanted {
+                return ids.indices.contains(index) && ids[index] == wanted
+            }
+            guard let candidate = frame(item) else { return false }
+            return sameFrame(candidate, target)
+        }
+        answer = ["ok": matches.count == 1, "matches": matches.count,
+                  "binding": byID ? "window_id" : "geometry"]
     } else if mode == "sidebar", let first = rows.first {
         let decision = sidebarDecision(fixtureModel(first).2, first["recent"] as? Int ?? 0,
                                        first["recentExpanded"] as? Bool)
@@ -90,17 +116,29 @@ func refuse(_ reason: String, restored: Bool? = nil) -> Never {
     if let restored = restored { fields["restored"] = restored }
     emit(fields, 2)
 }
-guard CommandLine.arguments.count == 9 else { refuse("参数数量不符") }
+guard CommandLine.arguments.count == 6 else { refuse("参数数量不符") }
 let action = CommandLine.arguments[1], title = CommandLine.arguments[2]
 guard let expectedPID = Int32(CommandLine.arguments[3]) else { refuse("PID 无效") }
-let bounds = CommandLine.arguments[4...7].compactMap(Double.init)
-guard bounds.count == 4 else { refuse("窗口边界无效") }
-let sendLabels = Set(CommandLine.arguments[8].split(separator: ",").map(String.init))
+guard let windowID = UInt32(CommandLine.arguments[4]), windowID != 0 else { refuse("窗口 ID 无效") }
+let sendLabels = Set(CommandLine.arguments[5].split(separator: ",").map(String.init))
 let codexBundle = "com.openai.codex"
 let stopLabels = Set(["停止", "Stop", "停止する", "Stopp", "Arrêter", "Detener"])
 let body = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
 let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
 guard apps.count == 1, apps[0].processIdentifier == expectedPID else { refuse("App 与 PID 无法唯一绑定") }
+let listed = CGWindowListCopyWindowInfo(.optionIncludingWindow, CGWindowID(windowID)) as? [[String: Any]] ?? []
+let cgMatches = listed.filter { info in
+    (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID &&
+    (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == expectedPID &&
+    (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 &&
+    (info[kCGWindowIsOnscreen as String] as? Bool) == true
+}
+guard cgMatches.count == 1,
+      let rawBounds = cgMatches[0][kCGWindowBounds as String] as? [String: Any],
+      let cgBounds = CGRect(dictionaryRepresentation: rawBounds as CFDictionary),
+      cgBounds.width > 200, cgBounds.height > 200 else {
+    refuse("WindowServer 窗口 ID、PID 或边界无法唯一确认")
+}
 let app = AXUIElementCreateApplication(expectedPID)
 // Electron exposes its web contents lazily unless manual accessibility is on.
 let manual = AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
@@ -108,13 +146,26 @@ guard manual == .success || manual == .attributeUnsupported else {
     refuse("无法启用 App 手动辅助功能（AXError \(manual.rawValue)）")
 }
 let windows = (value(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
-let matches = windows.filter { window in
-    var point = CGPoint.zero, size = CGSize.zero
-    guard let p = value(window, kAXPositionAttribute), let s = value(window, kAXSizeAttribute),
-          AXValueGetValue(p as! AXValue, .cgPoint, &point),
-          AXValueGetValue(s as! AXValue, .cgSize, &size) else { return false }
-    return abs(point.x - bounds[0]) < 2 && abs(point.y - bounds[1]) < 2 &&
-           abs(size.width - bounds[2]) < 2 && abs(size.height - bounds[3]) < 2
+// AX does not publish a public CGWindowID attribute. Resolve the long-standing
+// system SPI at runtime; if macOS removes it, fall back to a unique public
+// geometry match rather than guessing from title or window order.
+typealias AXWindowIDFunction = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+let windowIDSymbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow")
+let getAXWindowID = windowIDSymbol.map { unsafeBitCast($0, to: AXWindowIDFunction.self) }
+let matches: [AXUIElement]
+if let getAXWindowID = getAXWindowID {
+    matches = windows.filter { window in
+        var actual = CGWindowID(0)
+        return getAXWindowID(window, &actual) == .success && actual == windowID
+    }
+} else {
+    matches = windows.filter { window in
+        var point = CGPoint.zero, size = CGSize.zero
+        guard let p = value(window, kAXPositionAttribute), let s = value(window, kAXSizeAttribute),
+              AXValueGetValue(p as! AXValue, .cgPoint, &point),
+              AXValueGetValue(s as! AXValue, .cgSize, &size) else { return false }
+        return sameFrame(CGRect(origin: point, size: size), cgBounds)
+    }
 }
 guard matches.count == 1 else { refuse("App AXWindows 与屏上窗口无法唯一匹配") }
 let window = matches[0]
