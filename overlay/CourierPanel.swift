@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import ServiceManagement
 
 private struct Pair: Decodable {
     let from_app: String, to_app: String, from: String, to: String, state: String
@@ -90,6 +91,11 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let close = NSButton(title: "关闭", target: self, action: #selector(closePanel))
         stack.addArrangedSubview(close)
+        if #available(macOS 13.0, *) {
+            let login = NSButton(checkboxWithTitle: "登录时启动", target: self, action: #selector(toggleLogin(_:)))
+            login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+            stack.addArrangedSubview(login)
+        }
         let quit = NSButton(title: "退出投递小鸟", target: self, action: #selector(quitOverlay))
         stack.addArrangedSubview(quit)
     }
@@ -112,6 +118,16 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         reload(force: true)
     }
     @objc private func closePanel() { NSApp.terminate(nil) }
+    @objc private func toggleLogin(_ sender: NSButton) {
+        if #available(macOS 13.0, *) {
+            do {
+                if sender.state == .on { try SMAppService.mainApp.register() }
+                else { try SMAppService.mainApp.unregister() }
+            } catch {
+                sender.state = sender.state == .on ? .off : .on
+            }
+        }
+    }
     @objc private func quitOverlay() {
         try? Data().write(to: folder.appendingPathComponent("quit"), options: .atomic)
         NSApp.terminate(nil)
