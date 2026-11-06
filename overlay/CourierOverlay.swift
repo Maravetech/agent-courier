@@ -198,7 +198,7 @@ private final class Overlay {
         if !present { slDestroy(icon); icon = nil; return }
         if icon == nil {
             let screen = CGDisplayBounds(CGMainDisplayID())
-            iconRect = CGRect(x: screen.maxX-34, y: screen.minY+2, width: 28, height: 24)
+            iconRect = CGRect(x: min(screen.maxX-200, screen.midX+180), y: screen.minY+2, width: 28, height: 24)
             icon = slCreate(iconRect.minX, iconRect.minY, 28, 24, displayScale(Point(x: iconRect.midX, y: iconRect.midY)), 0)
         }
         slBird(icon, 0, 0, enabled ? 0.16 : 0.45, enabled ? 0.48 : 0.45, enabled ? 0.72 : 0.45, 0, 0)
@@ -412,7 +412,6 @@ private final class Overlay {
             }
             retained.append(item)
         }
-        _ = malloc_zone_pressure_relief(nil, 0)
         guard changed else { return }
         if let output = try? JSONEncoder().encode(Snapshot(pairs: retained)) {
             try? output.write(to: stateURL, options: .atomic)
@@ -430,11 +429,14 @@ private final class Overlay {
         }
     }
     private func maintenanceTick() {
-        if let data = try? Data(contentsOf: stateURL),
-           let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) {
-            watchRollouts(snapshot.pairs)
+        autoreleasepool {
+            if let data = try? Data(contentsOf: stateURL),
+               let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) {
+                watchRollouts(snapshot.pairs)
+            }
+            maintain()
         }
-        maintain()
+        _ = malloc_zone_pressure_relief(nil, 0)
     }
 }
 

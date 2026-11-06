@@ -180,9 +180,11 @@ final class SidebarLocator {
         }.sorted { $0.frame.minY < $1.frame.minY }
         let selected = candidates.first
         let title = selected?.text
-        let anchor = title.map { CGPoint(x: $0.minX - 20, y: $0.midY) }
+        let left = title?.minX ?? selected.map { $0.frame.minX + (app == "Codex" ? 42 : 12) }
+        let middle = title?.midY ?? selected?.frame.midY
+        let anchor = left.flatMap { x in middle.map { CGPoint(x: x - 20, y: $0) } }
         writeLog(app: app, number: number, hits: raw.count, selected: selected, anchor: anchor,
-                 note: candidates.count > 1 ? "multiple_visible_topmost" : selected == nil ? "not_visible" : title == nil ? "title_text_missing" : "ok")
+                 note: candidates.count > 1 ? "multiple_visible_topmost" : selected == nil ? "not_visible" : title == nil ? "fallback_padding" : "ok")
         return anchor
     }
     private func installObserver(pid: pid_t, element: AXUIElement) {
