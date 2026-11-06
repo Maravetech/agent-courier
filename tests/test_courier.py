@@ -117,6 +117,29 @@ class CourierTest(unittest.TestCase):
         self.assertIn("回复抬头：✅", out)
         self.assertIn("收到", out)
 
+    def test_wait_ignores_only_reply_header_trailing_whitespace(self):
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        original = Path(path).read_text(encoding='utf-8')
+        expected = '【回复】Codex·00159 → Claude Code·0007'
+        self.assertIn(expected, original)
+        def write_reply_header(first_line):
+            rows = [json.loads(line) for line in original.splitlines()]
+            for row in rows:
+                payload = row.get('payload', {})
+                if payload.get('role') == 'assistant':
+                    content = payload['content'][0]
+                    content['text'] = content['text'].replace(expected, first_line)
+            Path(path).write_text('\n'.join(json.dumps(row, ensure_ascii=False) for row in rows) + '\n', encoding='utf-8')
+        for first_line in (expected + '  ', expected + '\t'):
+            write_reply_header(first_line)
+            code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '0')
+            self.assertEqual(code, 0, out)
+            self.assertIn('回复抬头：✅', out)
+        for first_line in (' ' + expected, expected.replace(' → ', '  → ')):
+            write_reply_header(first_line)
+            code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '0')
+            self.assertEqual(code, 1, out)
+
     def test_wait_timeout(self):
         code, _ = self.run_cli("wait", TID, "--text", "missing-marker", "--timeout", "1", "--interval", "0.2")
         self.assertEqual(code, 3)
@@ -680,6 +703,12 @@ class CourierTest(unittest.TestCase):
         self.assertIn('does not set the Codex App title', english)
         self.assertIn('不会设置 Codex App 会话标题', chinese)
 
+    def test_skill_requires_reply_back_in_originating_session(self):
+        skill = Path(os.path.join(os.path.dirname(__file__), '..', 'skills', 'courier', 'SKILL.md')).read_text(encoding='utf-8')
+        self.assertIn('Round-trip acceptance', skill)
+        self.assertIn('originating session', skill)
+        self.assertIn('wait', skill)
+
     def test_native_ax_binds_visible_window_without_reading_double_cua_tree(self):
         windows = {'windows': [
             {'pid': 42, 'window_id': 111, 'is_on_screen': True,
@@ -887,6 +916,42 @@ class SwiftAXFixtureTest(unittest.TestCase):
                'staticTexts': ['00159 投递courier'], 'radios': [], 'areas': 1, 'targets': 2}
         self.assertEqual(self.fixture('button', [row])[1]['button_index'], 0)
         self.assertEqual(self.fixture('button', [dict(row, targets=0)])[0], 2)
+
+    def test_missing_target_reports_folded_sidebar_not_loading_timeout(self):
+        ready = {'window': '00172 current', 'toolbars': 1, 'staticTexts': ['00172 current'],
+                 'radios': [], 'areas': 1, 'targets': 0, 'recent': 1, 'recentExpanded': True}
+        code, result = self.fixture('sidebar', [ready], '00174 test')
+        self.assertEqual(code, 2)
+        self.assertEqual(result['reason'], '目标会话按钮不存在（侧栏分区可能折叠）')
+
+    def test_collapsed_recent_expands_switches_and_restores(self):
+        old = {'window': '00172 current', 'toolbars': 1, 'staticTexts': ['00172 current'],
+               'radios': [], 'areas': 1, 'targets': 0, 'recent': 1, 'recentExpanded': False}
+        expanded = dict(old, targets=1, recentExpanded=True)
+        switched = dict(expanded, window='00174 test', staticTexts=['00174 test'])
+        restored = dict(switched, recentExpanded=False, targets=0)
+        code, result = self.fixture('sidebar', [old, expanded, switched, restored], '00174 test')
+        self.assertEqual(code, 0)
+        self.assertTrue(result['sidebar_restored'])
+
+    def test_failed_sidebar_restore_refuses_success(self):
+        old = {'window': '00172 current', 'toolbars': 1, 'staticTexts': ['00172 current'],
+               'radios': [], 'areas': 1, 'targets': 0, 'recent': 1, 'recentExpanded': False}
+        expanded = dict(old, targets=1, recentExpanded=True)
+        switched = dict(expanded, window='00174 test', staticTexts=['00174 test'])
+        code, result = self.fixture('sidebar', [old, expanded, switched], '00174 test')
+        self.assertEqual(code, 2)
+        self.assertFalse(result['sidebar_restored'])
+
+    def test_restore_must_preserve_target_tab(self):
+        old = {'window': '00172 current', 'toolbars': 1, 'staticTexts': ['00172 current'],
+               'radios': [], 'areas': 1, 'targets': 0, 'recent': 1, 'recentExpanded': False}
+        expanded = dict(old, targets=1, recentExpanded=True)
+        switched = dict(expanded, window='00174 test', staticTexts=['00174 test'])
+        restored_wrong_tab = dict(old, recentExpanded=False)
+        code, result = self.fixture('sidebar', [old, expanded, switched, restored_wrong_tab], '00174 test')
+        self.assertEqual(code, 2)
+        self.assertTrue(result['sidebar_restored'])
 
 
 if __name__ == "__main__":
