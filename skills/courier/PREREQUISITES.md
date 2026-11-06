@@ -7,14 +7,14 @@ Check every item, in order. **Tested** means verified by hand on the environment
 | Item | Version |
 | --- | --- |
 | OS | macOS 27.0.1 (26A434) |
-| Codex desktop app | 26.1027.61615, bundle id `com.openai.codex` (the app bundle is `ChatGPT.app`) |
+| Codex desktop app | 26.1029.61003 (also tested 26.1027.61615), bundle id `com.openai.codex` (the app bundle is `ChatGPT.app`) |
 | Codex CLI | codex-cli 0.160.0 |
 | Claude desktop app | 4.16336.0 (Code tab) |
 | cua-driver | 0.5.0 (optional, for the fallback channel) |
 | Python | 3.9.6, standard library only |
 | Swift | Apple Swift 6.4 (`swift --version`), for native AX fallback |
 
-Other versions may work but are untested. A Codex app update can change the UI, so re-run the self-check (section 7) after updating.
+Other versions may work but are untested. Codex 26.1029 replaced the AXRadioButton tab with Chat toolbar static text. Re-run the self-check (section 7) after an App update. A cold start has only fixture coverage: the running App was not restarted for this review.
 
 ## 2. Required for every channel
 

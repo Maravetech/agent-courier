@@ -699,6 +699,23 @@ class CourierTest(unittest.TestCase):
         self.assertIn('codex_ax.swift', command[1])
         self.assertEqual(command[5:9], ['10', '20', '1000', '700'])
 
+    def test_native_ax_cold_start_primes_once_then_retries(self):
+        windows = {'windows': [{'pid': 42, 'window_id': 111, 'is_on_screen': True,
+                                'bounds': {'x': 10, 'y': 20, 'width': 1000, 'height': 700}}]}
+        calls = []
+        def fake_cua(tool, args):
+            calls.append((tool, args))
+            return json.dumps(windows if tool == 'list_windows' else {'tree_markdown': ''})
+        runs = [SimpleNamespace(returncode=2, stdout=json.dumps({'ok': False, 'warmup_required': True})),
+                SimpleNamespace(returncode=0, stdout=json.dumps({'ok': True, 'tab': '00174 test'}))]
+        with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'cua', side_effect=fake_cua), \
+             patch.object(subprocess, 'run', side_effect=runs) as run:
+            self.assertEqual(courier.native_ui_action('tab')['tab'], '00174 test')
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual([item[0] for item in calls], ['list_windows', 'get_window_state'])
+        self.assertEqual(calls[1][1]['query'], '聊天工具栏')
+
     def test_native_tab_ignores_ambiguous_double_axwindow_tree(self):
         ambiguous = ('- [0] AXWindow "Main"\n  - [1] AXRadioButton "00159 test target"\n'
                      '- [100] AXWindow "Main"\n  - [101] AXRadioButton "00159 test target"')
@@ -826,6 +843,50 @@ class ClaudeBackendTest(unittest.TestCase):
     def test_front_end_refused_for_claude(self):
         self.assertEqual(self.cli("ui-tab")[0], 2)
 
+
+
+@unittest.skipUnless(sys.platform == 'darwin', 'AppKit AX bridge requires macOS')
+class SwiftAXFixtureTest(unittest.TestCase):
+    """Pure Swift decision fixtures; no live App or ~/.codex access."""
+
+    SCRIPT = os.path.join(os.path.dirname(__file__), '..', 'skills', 'courier', 'scripts', 'codex_ax.swift')
+
+    def fixture(self, mode, snapshots, target=''):
+        payload = json.dumps({'mode': mode, 'snapshots': snapshots, 'target': target}, ensure_ascii=False)
+        run = subprocess.run(['swift', self.SCRIPT, 'fixture'], input=payload,
+                             text=True, capture_output=True, timeout=30)
+        return run.returncode, json.loads(run.stdout)
+
+    def test_toolbar_title_cross_checks_window_and_old_radio_still_works(self):
+        new = {'window': '00174 courier AX 投递测试', 'toolbars': 1,
+               'staticTexts': ['00174 courier AX 投递测试'], 'radios': [], 'areas': 1}
+        self.assertEqual(self.fixture('title', [new])[1]['tab'], new['window'])
+        self.assertEqual(self.fixture('title', [dict(new, staticTexts=['00172 wrong'])])[0], 2)
+        self.assertEqual(self.fixture('title', [dict(new, staticTexts=[])])[0], 2)
+        old = {'window': new['window'], 'toolbars': 0, 'staticTexts': [],
+               'radios': [new['window']], 'areas': 1}
+        self.assertEqual(self.fixture('title', [old])[0], 0)
+
+    def test_cold_start_waits_for_toolbar_and_composer_then_times_out_closed(self):
+        cold = {'window': 'ChatGPT', 'toolbars': 0, 'staticTexts': [], 'radios': [], 'areas': 0}
+        warm = {'window': '00174 courier AX 投递测试', 'toolbars': 1,
+                'staticTexts': ['00174 courier AX 投递测试'], 'radios': [], 'areas': 1}
+        self.assertEqual(self.fixture('ready', [cold, cold, warm])[1]['poll'], 2)
+        self.assertEqual(self.fixture('ready', [cold, cold])[0], 2)
+
+    def test_switch_accepts_delayed_title_only_after_matching_readback(self):
+        old = {'window': '00159 投递courier', 'toolbars': 1,
+               'staticTexts': ['00159 投递courier'], 'radios': [], 'areas': 1}
+        target = dict(old, window='00174 courier AX 投递测试',
+                      staticTexts=['00174 courier AX 投递测试'])
+        self.assertEqual(self.fixture('switch', [old, old, target], target['window'])[1]['poll'], 2)
+        self.assertEqual(self.fixture('switch', [old, old], target['window'])[0], 2)
+
+    def test_duplicate_exact_sidebar_buttons_choose_first(self):
+        row = {'window': '00159 投递courier', 'toolbars': 1,
+               'staticTexts': ['00159 投递courier'], 'radios': [], 'areas': 1, 'targets': 2}
+        self.assertEqual(self.fixture('button', [row])[1]['button_index'], 0)
+        self.assertEqual(self.fixture('button', [dict(row, targets=0)])[0], 2)
 
 
 if __name__ == "__main__":
