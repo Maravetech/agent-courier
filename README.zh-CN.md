@@ -30,11 +30,11 @@
 
 ## 可选投递小鸟浮层（macOS）
 
-运行 `sh overlay/build.sh` 构建 AppKit 浮层。三帧 SVG 是素材源，构建时由 macOS `sips` 光栅化为 2× 位图，以降低运行内存。稳定安装需设置 `COURIER_SIGN_IDENTITY` 并运行 `sh overlay/build.sh --install`；固定路径是 `~/Applications/courier-overlay.app`，bundle ID 是 `tech.marave.courier-overlay`。fenn 在系统设置中给这个 App 开启「辅助功能」；未授权时浮层隐藏且不弹窗。`overlay status` 可读授权状态。App 常驻菜单栏，提供显示开关、只读配对列表、默认关闭的登录时启动和退出；无配对时只等待文件变更，不轮询或读取 AX。
+运行 `sh overlay/build.sh` 构建 SkyLight/CoreGraphics 浮层。绘制进程不链接 AppKit；三帧 SVG 在构建时由 `sips` 转成共用的 2× PNG。稳定安装需签名身份，并将 `tech.marave.courier-overlay` 固定安装到 `~/Applications/courier-overlay.app` 后由 fenn 开启辅助功能；本机尚无签名身份，安装未验收。未授权时小鸟隐藏且不弹窗。进程只在有配对时运行，空配对约 3 秒退出；同一进程自绘小鸟图标，点击时按需启动独立 AppKit 配对面板。当前图标点击依赖系统已有的输入监控授权，未获授权时不会请求新权限，图标不可点击。面板提供显示开关、逐对关联/断开和退出；登录时启动尚未实现。断开状态写入 `$COURIER_STATE_DIR/overlay/links.json`，投递退出码 5。
 
-透明浮层点击穿透，不能成为 key window，不移动鼠标。浮层进程通过 AX 定位侧栏会话行，并在窗口移动、侧栏变化时重查。查找规则：Codex 在 `AXList` 下找标题以五位编号加空格开头的 `AXButton`；Claude 在 `AXWebArea` 下找标题以四位编号加空格开头、距窗口左侧不超过 320 pt 且宽不超过 320 pt 的 `AXButton`。重复 frame 去重，只取屏幕与滚动区可见行，再用行内标题 `AXStaticText` 的 frame 把鸟停在编号首字左侧 2 pt。每对画直线、两个圈，飞行 2.5 秒，翅膀用三帧切换。定位结果记入 `$COURIER_STATE_DIR/overlay/locate.log`。任一端看不到就隐藏，恢复后回到当前驻点。菜单开关写入 `$COURIER_STATE_DIR/overlay/config.json`。
+小窗口通过空事件区域设置点击穿透，进程不创建 key window，也没有移动鼠标的调用；物理点击仍需桌面实测。浮层进程通过 AX 定位侧栏会话行。查找规则：Codex 在 `AXList` 下找五位编号开头的 `AXButton`；Claude 在 `AXWebArea` 下找四位编号开头且位于左侧 320 pt 内的 `AXButton`。重复 frame 去重，只取屏幕与滚动区可见行，再用行内标题 `AXStaticText` 的 frame 把鸟停在编号首字左侧 2 pt。每对画直线、两个圈，飞行 2.5 秒，翅膀使用三帧 PNG，飞行和落点有 CoreGraphics 粒子，减弱动态效果时关闭粒子。最多显示最近活跃的 10 对，其他配对保留在面板。AXObserver 驱动重定位，结果记入 `$COURIER_STATE_DIR/overlay/locate.log`；任一端看不到就隐藏。菜单开关写入 `$COURIER_STATE_DIR/overlay/config.json`。
 
-Claude Computer use 发送前，运行 `python3 -I skills/courier/scripts/courier.py overlay pair --from 'Claude Code·0064' --to 'Codex·00165' --state sending`；Codex→Codex 也支持。控制端直接读 Codex 日志推进状态，`watch`、`verify`、`wait` 也会更新。`COURIER_OVERLAY=0` 关闭浮层。测试可设置 `COURIER_OVERLAY_PROBE=<路径>` 记录前台 PID、浮层 PID 与 key window；前台切换归因仍需结合操作记录。DSH 属于第二期。
+Claude Computer use 发送前先运行 `python3 -I skills/courier/scripts/courier.py overlay check --from 'Claude Code·0064' --to 'Codex·00165'`；退出码 5 时停止投递，再运行 `overlay pair --from ... --to ... --state sending`。Codex→Codex 也支持。原生 App 监听 Codex rollout 文件并推进状态，Python 控制命令一次性退出；`watch`、`verify`、`wait` 也会更新。`COURIER_OVERLAY=0` 关闭浮层但不绕过断开门禁。测试可设置 `COURIER_OVERLAY_PROBE=<路径>` 记录前台 PID、浮层 PID 与 key window；前台切换归因仍需结合操作记录。DSH 属于第二期。
 
 ## 安装
 

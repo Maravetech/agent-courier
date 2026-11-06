@@ -1,10 +1,11 @@
-import AppKit
+import Foundation
 import ApplicationServices
 import CoreGraphics
 import Darwin
 /// Per-app AX rules. Coordinates returned by AXPosition are global screen points,
 /// with the menu-bar screen's top-left as the origin.
 final class SidebarLocator {
+    @_silgen_name("proc_pidpath") private static func processPath(_ pid: Int32, _ buffer: UnsafeMutableRawPointer, _ size: UInt32) -> Int32
     struct Candidate {
         let frame: CGRect
         let clip: CGRect
@@ -51,11 +52,21 @@ final class SidebarLocator {
         (attribute(element, name) as? Bool) ?? false
     }
     private func visibleScreens() -> [CGRect] {
-        guard let primary = NSScreen.screens.first else { return [] }
-        return NSScreen.screens.map { screen in
-            CGRect(x: screen.frame.minX, y: primary.frame.maxY - screen.frame.maxY,
-                   width: screen.frame.width, height: screen.frame.height)
+        var displays = [CGDirectDisplayID](repeating: 0, count: 32)
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(32, &displays, &count) == .success else { return [] }
+        return displays.prefix(Int(count)).map { CGDisplayBounds($0) }
+    }
+    private func runningPID(bundle: String) -> pid_t? {
+        guard let rows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else { return nil }
+        for pid in Set(rows.compactMap { $0[kCGWindowOwnerPID as String] as? pid_t }) {
+            var buffer = [CChar](repeating: 0, count: 4096)
+            let length = buffer.withUnsafeMutableBytes { Self.processPath(pid, $0.baseAddress!, UInt32($0.count)) }
+            guard length > 0, let range = String(cString: buffer).range(of: ".app/") else { continue }
+            let path = String(String(cString: buffer)[..<range.upperBound].dropLast())
+            if Bundle(path: path)?.bundleIdentifier == bundle { return pid }
         }
+        return nil
     }
     private func titleFrame(_ button: AXUIElement, number: String) -> CGRect? {
         var queue = children(button), budget = 80
@@ -136,11 +147,10 @@ final class SidebarLocator {
 
     func locate(app: String, number: String) -> CGPoint? {
         guard authorized() else { writeLog(app: app, number: number, hits: 0, selected: nil, anchor: nil, note: "unauthorized"); return nil }
-        guard let bundle = bundles[app], let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else {
+        guard let bundle = bundles[app], let pid = runningPID(bundle: bundle) else {
             writeLog(app: app, number: number, hits: 0, selected: nil, anchor: nil, note: "app_missing")
             return nil
         }
-        let pid = running.processIdentifier
         let root = AXUIElementCreateApplication(pid)
         if !activatedPIDs.contains(pid) {
             AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
@@ -170,11 +180,9 @@ final class SidebarLocator {
         }.sorted { $0.frame.minY < $1.frame.minY }
         let selected = candidates.first
         let title = selected?.text
-        let x = (title?.minX ?? selected.map { $0.frame.minX + (app == "Codex" ? 42 : 12) })
-        let y = title?.midY ?? selected?.frame.midY
-        let anchor = x.flatMap { left in y.map { CGPoint(x: left - 20, y: $0) } }
+        let anchor = title.map { CGPoint(x: $0.minX - 20, y: $0.midY) }
         writeLog(app: app, number: number, hits: raw.count, selected: selected, anchor: anchor,
-                 note: candidates.count > 1 ? "multiple_visible_topmost" : selected == nil ? "not_visible" : title == nil ? "fallback_padding" : "ok")
+                 note: candidates.count > 1 ? "multiple_visible_topmost" : selected == nil ? "not_visible" : title == nil ? "title_text_missing" : "ok")
         return anchor
     }
     private func installObserver(pid: pid_t, element: AXUIElement) {

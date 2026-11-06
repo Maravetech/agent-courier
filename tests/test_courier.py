@@ -954,32 +954,42 @@ class CourierTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 overlay.update_pair("not-a-number", "Codex·00172", "sending")
 
-    def test_overlay_archive_uses_current_db_flag(self):
-        database = Path(self.tmp.name, "state_5.sqlite")
-        with sqlite3.connect(database) as db:
-            db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, archived INTEGER)")
-            db.execute("INSERT INTO threads VALUES (?, 0)", (TID2,))
-        with patch.dict(os.environ, {"CODEX_HOME": self.tmp.name}):
-            self.assertFalse(overlay.archived_codex("00160"))
-            with sqlite3.connect(database) as db:
-                db.execute("UPDATE threads SET archived=1 WHERE id=?", (TID2,))
-            self.assertTrue(overlay.archived_codex("00160"))
+    def test_overlay_link_disconnect_blocks_send_and_reconnects(self):
+        state = Path(self.tmp.name, "overlay")
+        sender, recipient = "Claude Code·0102", "Codex·00172"
+        with patch.object(overlay, "STATE_DIR", state), patch.object(overlay, "STATE_FILE", state / "pairs.json"), \
+             patch.object(overlay, "LINKS_FILE", state / "links.json"):
+            with self.assertRaises(ValueError):
+                overlay.set_link(sender, recipient, False)
+            overlay.update_pair(sender, recipient, "idle")
+            overlay.set_link(sender, recipient, False)
+            self.assertTrue(overlay.is_disconnected(sender, recipient))
+            with self.assertRaises(PermissionError):
+                overlay.update_pair(sender, recipient, "sending")
+            overlay.set_link(sender, recipient, True)
+            self.assertFalse(overlay.is_disconnected(sender, recipient))
+            overlay.update_pair(sender, recipient, "sending")
+            self.assertEqual(overlay.read_pairs()[0]["state"], "sending")
+            overlay.set_link(sender, recipient, False)
+            overlay.update_pair(sender, recipient, "archived_source")
+            self.assertFalse(overlay.is_disconnected(sender, recipient))
 
-    def test_overlay_monitor_reads_codex_reply_without_watch(self):
-        pair = {"from_app": "Claude Code", "from": "0007", "to_app": "Codex", "to": "00159",
-                "state": "working", "updated_at": 0}
-        with patch.dict(sys.modules, {"courier": courier}), patch.object(courier, "CODEX", self.tmp.name), \
-             patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")):
-            self.assertEqual(overlay.codex_progress(pair), ("replied", ""))
+    def test_disconnected_link_refuses_send_before_process_spawn(self):
+        body = Path(self.tmp.name, "body.txt")
+        body.write_text("【投递】Claude Code·0007 → Codex·00159\nfixture", encoding="utf-8")
+        args = SimpleNamespace(file=str(body), new=False, key=TID, sandbox="workspace-write", cwd=None)
+        with patch.object(courier, "overlay_check", return_value=5), patch.object(courier.subprocess, "Popen") as start:
+            self.assertEqual(courier.cmd_send(args), 5)
+        start.assert_not_called()
 
-    def test_overlay_progress_imports_courier_in_isolated_process(self):
-        code = ("import importlib.util,sys; s=importlib.util.spec_from_file_location('overlay',sys.argv[1]); "
-                "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
-                "print(m.codex_progress({'to_app':'Codex','to':'99999'}))")
-        result = subprocess.run([sys.executable, "-I", "-c", code, OVERLAY_SCRIPT],
-                                env={**self.env, "CODEX_HOME": self.tmp.name}, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "None")
+    def test_disconnected_link_refuses_ui_send_before_ui_touch(self):
+        body = Path(self.tmp.name, "body-ui.txt")
+        body.write_text("【投递】Claude Code·0007 → Codex·00159\nfixture", encoding="utf-8")
+        args = SimpleNamespace(file=str(body), session_id=TID, expect_tab="00159 test target")
+        with patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")), \
+             patch.object(courier, "overlay_check", return_value=5), patch.object(courier, "cua_target") as target:
+            self.assertEqual(courier.cmd_ui_send(args), 5)
+        target.assert_not_called()
 
     def test_overlay_existing_app_is_not_started_twice(self):
         app = Path(self.tmp.name, "courier-overlay")

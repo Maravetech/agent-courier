@@ -29,6 +29,9 @@ First time? Go through [`PREREQUISITES.md`](PREREQUISITES.md) and run its self-c
 | `wait <ID> --text <unique delivery snippet>` | Wait for the first turn end after that delivery; check the reply header | 0 verified / 1 failed / 2 ambiguous / 3 timeout |
 | `watch <ID> [<ID> …] --since <time>` | One-shot wake when any listed session ends a turn | 0 ended / 3 timeout |
 | `watch <ID> --stream` | Continuously print start, complete, abort, and approval-wait changes | 0 on bounded timeout |
+| `overlay pair --from 'Claude Code·0007' --to 'Codex·00159' --state sending` | Start the optional click-through bird overlay before a Computer use send | 0 (visual failure never blocks delivery) |
+| `overlay check --from 'Claude Code·0007' --to 'Codex·00159'` | Gate a Computer use send against a disconnected pair | 0 allowed / 5 disconnected |
+| `overlay status` | Read the overlay App's Accessibility authorization state | 0 if read |
 | `ui-tab` / `ui-switch <exact title>` / `ui-send --file <body> --session-id <ID> --expect-tab <exact title>` | Fallback front end for an existing session; use `--window-id <ID>` on each command when multiple Codex windows are on screen | `ui-send`: 0 clicked / 2 refused / 1 no send button |
 | `--app claude <find\|status\|verify\|wait\|watch\|locate\|compose>` | Claude desktop session records (`~/.claude/projects`) | as above |
 | `--app claude send <ID, four-digit number, or exact title> --file <body>` | Send one headed Codex message to a uniquely named Claude Code session through one `claude -p` / `SendMessage` call | 0 accepted / 2 refused / 5 CLI or receipt failure |

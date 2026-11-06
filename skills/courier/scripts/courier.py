@@ -701,6 +701,24 @@ def cmd_overlay_status(a):
     return subprocess.call([sys.executable, "-I", controller, "--status"])
 
 
+def overlay_check(sender, recipient):
+    """A disconnected link is a delivery gate, even when visuals are disabled."""
+    if recipient.endswith("·新建"):
+        return 0
+    controller = os.path.join(os.path.dirname(__file__), "overlay_controller.py")
+    result = subprocess.run([sys.executable, "-I", controller, "--check", "--from-session", sender,
+                             "--to-session", recipient], text=True, capture_output=True)
+    if result.returncode:
+        print(result.stderr.strip() or "投递关联检查失败", file=sys.stderr)
+    return result.returncode
+
+
+def cmd_overlay_check(a):
+    sender = a.from_session if "·" in a.from_session else token("Claude Code", a.from_session)
+    recipient = a.to if "·" in a.to else token("Codex", a.to)
+    return overlay_check(sender, recipient)
+
+
 def has_header(text):
     return parse_header(text) is not None
 
@@ -835,6 +853,8 @@ def cmd_send(a):
         if parsed[1] != token("Codex", session_number(d.get("thread_name"), d["id"])):
             print("拒发：投递抬头的收件令牌与目标会话不符", file=sys.stderr)
             return 2
+    if overlay_check(*parsed):
+        return 5
     os.makedirs(LOGDIR, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     log = os.path.join(LOGDIR, f"send-{stamp}.log")
@@ -1313,6 +1333,8 @@ def cmd_ui_send(a):
     if not parsed or parsed[1] != token("Codex", session_number(d.get("thread_name"), d["id"])):
         print("拒发：正文收件令牌与目标会话不符", file=sys.stderr)
         return 2
+    if overlay_check(*parsed):
+        return 5
     if USE_NATIVE_AX:
         deadline = time.monotonic() + max(0, getattr(a, "front_timeout", 30))
         since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1327,6 +1349,7 @@ def cmd_ui_send(a):
             if parsed[1] != token("Codex", session_number(current["tab"], d["id"])):
                 print("拒发：投递抬头的收件编号与当前标签页编号不符；没有写入")
                 return 2
+            overlay_emit("sending", body)
             result = native_ui_action("send", a.expect_tab, body, getattr(a, "window_id", None))
             if not (result.get("foreground") and not result.get("mutated")
                     and time.monotonic() < deadline):
@@ -1461,6 +1484,8 @@ def main():
         choices=["idle", "pending", "sending", "delivered", "working", "replied", "wrong_header", "error", "stuck", "archived_source", "archived_target"])
     pair.add_argument("--reason"); pair.set_defaults(fn=cmd_overlay_pair)
     overlay_sub.add_parser("status").set_defaults(fn=cmd_overlay_status)
+    check = overlay_sub.add_parser("check"); check.add_argument("--from", dest="from_session", required=True)
+    check.add_argument("--to", required=True); check.set_defaults(fn=cmd_overlay_check)
     n = sub.add_parser("send"); n.add_argument("key", nargs="?"); n.add_argument("--file", required=True)
     n.add_argument("--new", action="store_true"); n.add_argument("--cwd")
     n.add_argument("--sandbox", default="workspace-write", choices=["read-only", "workspace-write"])

@@ -1,9 +1,13 @@
 #!/bin/sh
 set -eu
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-app="$here/build/courier-overlay.app"
+app="${COURIER_BUILD_APP:-$here/build/courier-overlay.app}"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-swiftc -O -framework AppKit -framework ServiceManagement "$here/SidebarLocator.swift" "$here/CourierOverlay.swift" -o "$app/Contents/MacOS/courier-overlay"
+clang -O2 -c "$here/SkyLightBridge.c" -o "$app/Contents/Resources/SkyLightBridge.o"
+swiftc -O -framework Foundation -framework ApplicationServices -framework CoreGraphics -framework ImageIO \
+  "$here/SidebarLocator.swift" "$here/CourierOverlay.swift" "$app/Contents/Resources/SkyLightBridge.o" \
+  -o "$app/Contents/MacOS/courier-overlay"
+swiftc -O -parse-as-library -framework AppKit "$here/CourierPanel.swift" -o "$app/Contents/MacOS/courier-panel"
 cp "$here"/assets/bird-*.svg "$app/Contents/Resources/"
 for source in "$here"/assets/bird-*.svg; do
   name=$(basename "$source" .svg)

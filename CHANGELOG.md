@@ -2,7 +2,7 @@
 
 ## 0.4.0
 
-- Optional macOS bird overlay anchors 2 pt before Claude or Codex sidebar conversation numbers through Accessibility. Each pair has two rings, one straight line, and a three-frame bird that flies for 2.5 seconds. A persistent menu-bar switch lists pairs and offers opt-in launch at login; idle mode has no AX polling.
+- Optional macOS bird overlay anchors 2 pt before Claude or Codex sidebar conversation numbers through Accessibility. Each visible pair has two rings, one straight line, a three-frame bird that flies for 2.5 seconds, and restrained CoreGraphics particles. The resident SkyLight renderer uses small click-through windows and no AppKit; it draws its own icon and opens a separate AppKit pair panel on demand. The ten most recently active pairs display, while the panel lists all pairs and lets users connect or disconnect existing pairs. A disconnected pair blocks delivery with exit code 5. The renderer exits after the last pair disappears. Signed installation, icon click without new permissions, and Launch at Login remain unverified or incomplete.
 - `overlay pair` supports Computer use deliveries; `ui-send`, `verify`, `wait`, and `watch` update the visual state automatically. `COURIER_OVERLAY=0` disables it.
 - Per-app AX rules, visible-row filtering, duplicate-frame selection, and `locate.log` track anchors. A test-only focus probe records the overlay's PID, foreground app, and key-window state.
 - Use the shared brand bird icon from the local 0.2.2 icon update; the remote release was already 0.3.0 when this feature branch was started.
