@@ -845,6 +845,7 @@ class ClaudeBackendTest(unittest.TestCase):
 
 
 
+@unittest.skipUnless(sys.platform == 'darwin', 'AppKit AX bridge requires macOS')
 class SwiftAXFixtureTest(unittest.TestCase):
     """Pure Swift decision fixtures; no live App or ~/.codex access."""
 
