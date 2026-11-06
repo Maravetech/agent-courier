@@ -4,6 +4,45 @@ import ApplicationServices
 import AppKit
 import Foundation
 
+// Pure decisions are also exercised by the offline fixture mode below.
+func resolvedTitle(_ window: String, _ toolbars: Int, _ staticTexts: [String], _ radios: [String]) -> String? {
+    guard !window.isEmpty, window != "ChatGPT" else { return nil }
+    if toolbars > 0 {
+        let texts = staticTexts.filter { !$0.isEmpty }
+        return toolbars == 1 && texts.count == 1 && texts[0] == window ? window : nil
+    }
+    return radios.count == 1 && radios[0] == window ? window : nil
+}
+func fixtureModel(_ raw: [String: Any]) -> (String?, Int, Int) {
+    let title = resolvedTitle(raw["window"] as? String ?? "", raw["toolbars"] as? Int ?? 0,
+                              raw["staticTexts"] as? [String] ?? [], raw["radios"] as? [String] ?? [])
+    return (title, raw["areas"] as? Int ?? 0, raw["targets"] as? Int ?? 0)
+}
+if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "fixture" {
+    let data = FileHandle.standardInput.readDataToEndOfFile()
+    guard let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+          let mode = raw["mode"] as? String else { exit(2) }
+    let rows = raw["snapshots"] as? [[String: Any]] ?? []
+    let target = raw["target"] as? String ?? ""
+    var answer: [String: Any] = ["ok": false]
+    if mode == "title", let row = rows.first {
+        if let title = fixtureModel(row).0 { answer = ["ok": true, "tab": title] }
+    } else if mode == "ready" || mode == "switch" {
+        for (index, row) in rows.enumerated() {
+            let (title, areas, _) = fixtureModel(row)
+            if areas == 1 && title != nil && (mode == "ready" || title == target) {
+                answer = ["ok": true, "tab": title!, "poll": index]
+                break
+            }
+        }
+    } else if mode == "button", let row = rows.first {
+        if fixtureModel(row).2 >= 1 { answer = ["ok": true, "button_index": 0] }
+    }
+    let encoded = try! JSONSerialization.data(withJSONObject: answer, options: [.sortedKeys])
+    print(String(data: encoded, encoding: .utf8)!)
+    exit(answer["ok"] as? Bool == true ? 0 : 2)
+}
+
 func value(_ element: AXUIElement, _ key: String) -> AnyObject? {
     var result: AnyObject?
     return AXUIElementCopyAttributeValue(element, key as CFString, &result) == .success ? result : nil
@@ -32,6 +71,11 @@ let body = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding
 let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
 guard apps.count == 1, apps[0].processIdentifier == expectedPID else { refuse("App 与 PID 无法唯一绑定") }
 let app = AXUIElementCreateApplication(expectedPID)
+// Electron exposes its web contents lazily unless manual accessibility is on.
+let manual = AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+guard manual == .success || manual == .attributeUnsupported else {
+    refuse("无法启用 App 手动辅助功能（AXError \(manual.rawValue)）")
+}
 let windows = (value(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
 let matches = windows.filter { window in
     var point = CGPoint.zero, size = CGSize.zero
@@ -45,6 +89,8 @@ guard matches.count == 1 else { refuse("App AXWindows 与屏上窗口无法唯�
 let window = matches[0]
 struct Snapshot {
     var tabs: [AXUIElement] = []
+    var toolbars = 0
+    var toolbarTexts: [String] = []
     var areas: [AXUIElement] = []
     var sends: [AXUIElement] = []
     var stops: [AXUIElement] = []
@@ -54,11 +100,21 @@ struct Snapshot {
 }
 func snapshot() -> Snapshot {
     var result = Snapshot()
-    func walk(_ element: AXUIElement, _ depth: Int) {
+    func walk(_ element: AXUIElement, _ depth: Int, _ inToolbar: Bool) {
         if depth > 40 || result.count > 20000 { result.truncated = true; return }
         result.count += 1
         let role = string(element, kAXRoleAttribute)
         let label = string(element, kAXTitleAttribute)
+        let chatToolbar = role == "AXToolbar" &&
+            (label == "聊天工具栏" || label == "Chat toolbar" ||
+             string(element, kAXDescriptionAttribute) == "聊天工具栏" ||
+             string(element, kAXDescriptionAttribute) == "Chat toolbar")
+        let toolbar = inToolbar || chatToolbar
+        if role == "AXToolbar" { result.toolbars += 1 }
+        if role == "AXStaticText" && toolbar {
+            let text = string(element, kAXValueAttribute)
+            if !text.isEmpty { result.toolbarTexts.append(text) }
+        }
         if role == "AXRadioButton" { result.tabs.append(element) }
         if role == "AXTextArea" { result.areas.append(element) }
         if role == "AXButton" {
@@ -67,35 +123,54 @@ func snapshot() -> Snapshot {
             if label == title { result.targetButtons.append(element) }
         }
         if let children = value(element, kAXChildrenAttribute) as? [AXUIElement] {
-            for child in children { walk(child, depth + 1) }
+            for child in children { walk(child, depth + 1, toolbar) }
         }
     }
-    walk(window, 0)
+    walk(window, 0, false)
     if result.truncated { refuse("AX 树过深或过大") }
     return result
 }
 func front() -> String { NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "" }
 func tab(_ state: Snapshot) -> String? {
-    state.tabs.count == 1 ? string(state.tabs[0], kAXTitleAttribute) : nil
+    resolvedTitle(string(window, kAXTitleAttribute), state.toolbars, state.toolbarTexts,
+                  state.tabs.map { string($0, kAXTitleAttribute) })
 }
 let before = front()
-let initial = snapshot()
+let deadline = Date().addingTimeInterval(4)
+var initial = snapshot()
+func ready(_ state: Snapshot) -> Bool {
+    if action == "switch" { return state.areas.count == 1 && !state.targetButtons.isEmpty }
+    return tab(state) != nil && state.areas.count == 1
+}
+while !ready(initial) && Date() < deadline {
+    Thread.sleep(forTimeInterval: 0.15)
+    initial = snapshot()
+}
+guard ready(initial) else {
+    emit(["ok": false, "reason": "聊天工具栏或输入框加载超时", "warmup_required": true], 2)
+}
 if action == "tab" {
     guard let current = tab(initial) else { refuse("标签页不唯一") }
     emit(["ok": true, "tab": current, "front_before": before, "front_after": front()])
 }
 if action == "switch" {
-    guard initial.targetButtons.count == 1 else { refuse("目标会话按钮不唯一或不存在") }
+    guard !initial.targetButtons.isEmpty else { refuse("目标会话按钮不存在") }
     let pressed = AXUIElementPerformAction(initial.targetButtons[0], kAXPressAction as CFString)
     guard pressed == .success else { refuse("切页 AXPress 失败") }
-    Thread.sleep(forTimeInterval: 0.2)
-    let actual = tab(snapshot()) ?? "无法判定"
+    let switchDeadline = Date().addingTimeInterval(3)
+    var actual = "无法判定"
+    repeat {
+        let current = snapshot()
+        actual = tab(current) ?? "无法判定"
+        if actual == title && current.areas.count == 1 && front() == before {
+            emit(["ok": true, "tab": actual, "front_before": before, "front_after": front()])
+        }
+        if front() != before { break }
+        Thread.sleep(forTimeInterval: 0.15)
+    } while Date() < switchDeadline
     let after = front()
-    guard actual == title, string(window, kAXTitleAttribute) == title, before == after else {
-        emit(["ok": false, "reason": "切页后核对失败", "actual_tab": actual,
-              "front_before": before, "front_after": after], 2)
-    }
-    emit(["ok": true, "tab": actual, "front_before": before, "front_after": after])
+    emit(["ok": false, "reason": "切页后核对失败", "actual_tab": actual,
+          "front_before": before, "front_after": after], 2)
 }
 guard action == "send", !body.isEmpty else { refuse("操作或正文无效") }
 guard tab(initial) == title, string(window, kAXTitleAttribute) == title,

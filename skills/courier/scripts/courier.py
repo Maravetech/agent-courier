@@ -768,13 +768,23 @@ def native_ui_action(action, title="", body="", window_id=None):
     cmd = ["swift", script, action, title, str(pid),
            *(str(bounds[k]) for k in ("x", "y", "width", "height")),
            ",".join(SEND_LABELS)]
-    run = subprocess.run(cmd, input=body, capture_output=True, text=True, timeout=45)
-    try:
-        result = json.loads(run.stdout)
-    except ValueError:
-        raise RuntimeError("原生 AX 桥接未返回可解析结果") from None
-    if not isinstance(result, dict) or (run.returncode == 0) != bool(result.get("ok")):
-        raise RuntimeError("原生 AX 桥接结果与退出码不一致")
+    def invoke():
+        run = subprocess.run(cmd, input=body, capture_output=True, text=True, timeout=45)
+        try:
+            result = json.loads(run.stdout)
+        except ValueError:
+            raise RuntimeError("原生 AX 桥接未返回可解析结果") from None
+        if not isinstance(result, dict) or (run.returncode == 0) != bool(result.get("ok")):
+            raise RuntimeError("原生 AX 桥接结果与退出码不一致")
+        return result
+
+    result = invoke()
+    if result.get("warmup_required"):
+        # Read once to make Electron expose web AX nodes. Do not use the
+        # CuaDriver tree for control selection or print its contents.
+        cua("get_window_state", {"pid": pid, "window_id": wid,
+                                 "capture_mode": "ax", "query": "聊天工具栏"})
+        result = invoke()
     return result
 
 
