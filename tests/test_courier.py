@@ -680,6 +680,12 @@ class CourierTest(unittest.TestCase):
         self.assertIn('does not set the Codex App title', english)
         self.assertIn('不会设置 Codex App 会话标题', chinese)
 
+    def test_skill_requires_reply_back_in_originating_session(self):
+        skill = Path(os.path.join(os.path.dirname(__file__), '..', 'skills', 'courier', 'SKILL.md')).read_text(encoding='utf-8')
+        self.assertIn('Round-trip acceptance', skill)
+        self.assertIn('originating session', skill)
+        self.assertIn('wait', skill)
+
     def test_native_ax_binds_visible_window_without_reading_double_cua_tree(self):
         windows = {'windows': [
             {'pid': 42, 'window_id': 111, 'is_on_screen': True,
@@ -887,6 +893,32 @@ class SwiftAXFixtureTest(unittest.TestCase):
                'staticTexts': ['00159 投递courier'], 'radios': [], 'areas': 1, 'targets': 2}
         self.assertEqual(self.fixture('button', [row])[1]['button_index'], 0)
         self.assertEqual(self.fixture('button', [dict(row, targets=0)])[0], 2)
+
+    def test_missing_target_reports_folded_sidebar_not_loading_timeout(self):
+        ready = {'window': '00172 current', 'toolbars': 1, 'staticTexts': ['00172 current'],
+                 'radios': [], 'areas': 1, 'targets': 0, 'recent': 1, 'recentExpanded': True}
+        code, result = self.fixture('sidebar', [ready], '00174 test')
+        self.assertEqual(code, 2)
+        self.assertEqual(result['reason'], '目标会话按钮不存在（侧栏分区可能折叠）')
+
+    def test_collapsed_recent_expands_switches_and_restores(self):
+        old = {'window': '00172 current', 'toolbars': 1, 'staticTexts': ['00172 current'],
+               'radios': [], 'areas': 1, 'targets': 0, 'recent': 1, 'recentExpanded': False}
+        expanded = dict(old, targets=1, recentExpanded=True)
+        switched = dict(expanded, window='00174 test', staticTexts=['00174 test'])
+        restored = dict(switched, recentExpanded=False, targets=0)
+        code, result = self.fixture('sidebar', [old, expanded, switched, restored], '00174 test')
+        self.assertEqual(code, 0)
+        self.assertTrue(result['sidebar_restored'])
+
+    def test_failed_sidebar_restore_refuses_success(self):
+        old = {'window': '00172 current', 'toolbars': 1, 'staticTexts': ['00172 current'],
+               'radios': [], 'areas': 1, 'targets': 0, 'recent': 1, 'recentExpanded': False}
+        expanded = dict(old, targets=1, recentExpanded=True)
+        switched = dict(expanded, window='00174 test', staticTexts=['00174 test'])
+        code, result = self.fixture('sidebar', [old, expanded, switched], '00174 test')
+        self.assertEqual(code, 2)
+        self.assertFalse(result['sidebar_restored'])
 
 
 if __name__ == "__main__":

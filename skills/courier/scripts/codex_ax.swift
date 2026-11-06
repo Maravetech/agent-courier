@@ -18,6 +18,11 @@ func fixtureModel(_ raw: [String: Any]) -> (String?, Int, Int) {
                               raw["staticTexts"] as? [String] ?? [], raw["radios"] as? [String] ?? [])
     return (title, raw["areas"] as? Int ?? 0, raw["targets"] as? Int ?? 0)
 }
+func sidebarDecision(_ targets: Int, _ recentCount: Int, _ recentExpanded: Bool?) -> String {
+    if targets > 0 { return "target" }
+    if recentCount == 1 && recentExpanded == false { return "expand_recent" }
+    return "missing"
+}
 if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "fixture" {
     let data = FileHandle.standardInput.readDataToEndOfFile()
     guard let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -37,6 +42,22 @@ if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "fixture" {
         }
     } else if mode == "button", let row = rows.first {
         if fixtureModel(row).2 >= 1 { answer = ["ok": true, "button_index": 0] }
+    } else if mode == "sidebar", let first = rows.first {
+        let decision = sidebarDecision(fixtureModel(first).2, first["recent"] as? Int ?? 0,
+                                       first["recentExpanded"] as? Bool)
+        if decision == "missing" {
+            answer = ["ok": false, "reason": "目标会话按钮不存在（侧栏分区可能折叠）"]
+        } else if decision == "expand_recent" {
+            let expanded = rows.count > 1 ? rows[1] : [:]
+            let switched = rows.count > 2 ? rows[2] : [:]
+            let restored = rows.count > 3 ? rows[3] : [:]
+            let expandedOK = expanded["recentExpanded"] as? Bool == true && fixtureModel(expanded).2 > 0
+            let switchedOK = fixtureModel(switched).0 == target
+            let restoredOK = restored["recentExpanded"] as? Bool == false
+            answer = ["ok": expandedOK && switchedOK && restoredOK,
+                      "sidebar_restored": restoredOK,
+                      "reason": restoredOK ? "" : "侧栏状态未还原；拒发"]
+        }
     }
     let encoded = try! JSONSerialization.data(withJSONObject: answer, options: [.sortedKeys])
     print(String(data: encoded, encoding: .utf8)!)
@@ -95,6 +116,7 @@ struct Snapshot {
     var sends: [AXUIElement] = []
     var stops: [AXUIElement] = []
     var targetButtons: [AXUIElement] = []
+    var recentButtons: [AXUIElement] = []
     var count = 0
     var truncated = false
 }
@@ -121,6 +143,7 @@ func snapshot() -> Snapshot {
             if sendLabels.contains(label) { result.sends.append(element) }
             if stopLabels.contains(label) { result.stops.append(element) }
             if label == title { result.targetButtons.append(element) }
+            if label == "最近" || label == "Recent" { result.recentButtons.append(element) }
         }
         if let children = value(element, kAXChildrenAttribute) as? [AXUIElement] {
             for child in children { walk(child, depth + 1, toolbar) }
@@ -135,11 +158,19 @@ func tab(_ state: Snapshot) -> String? {
     resolvedTitle(string(window, kAXTitleAttribute), state.toolbars, state.toolbarTexts,
                   state.tabs.map { string($0, kAXTitleAttribute) })
 }
+func recentExpanded(_ state: Snapshot) -> Bool? {
+    guard state.recentButtons.count == 1,
+          let number = value(state.recentButtons[0], "AXExpanded") as? NSNumber else { return nil }
+    return number.boolValue
+}
 let before = front()
 let deadline = Date().addingTimeInterval(4)
 var initial = snapshot()
 func ready(_ state: Snapshot) -> Bool {
-    if action == "switch" { return state.areas.count == 1 && !state.targetButtons.isEmpty }
+    if action == "switch" {
+        return state.areas.count == 1 &&
+            (tab(state) != nil || !state.targetButtons.isEmpty || !state.recentButtons.isEmpty)
+    }
     return tab(state) != nil && state.areas.count == 1
 }
 while !ready(initial) && Date() < deadline {
@@ -154,23 +185,69 @@ if action == "tab" {
     emit(["ok": true, "tab": current, "front_before": before, "front_after": front()])
 }
 if action == "switch" {
-    guard !initial.targetButtons.isEmpty else { refuse("目标会话按钮不存在") }
-    let pressed = AXUIElementPerformAction(initial.targetButtons[0], kAXPressAction as CFString)
-    guard pressed == .success else { refuse("切页 AXPress 失败") }
+    let decision = sidebarDecision(initial.targetButtons.count, initial.recentButtons.count,
+                                   recentExpanded(initial))
+    guard decision != "missing" else { refuse("目标会话按钮不存在（侧栏分区可能折叠）") }
+    let expandedByUs = decision == "expand_recent"
+    func restoreRecent() -> Bool {
+        if !expandedByUs { return true }
+        var state = snapshot()
+        guard state.recentButtons.count == 1 else { return false }
+        if recentExpanded(state) == true {
+            let code = AXUIElementPerformAction(state.recentButtons[0], kAXPressAction as CFString)
+            if code != .success { return false }
+        }
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            state = snapshot()
+            if recentExpanded(state) == false && front() == before { return true }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+        return false
+    }
+    func finishSwitch(_ success: Bool, _ actual: String, _ reason: String) -> Never {
+        let restored = restoreRecent()
+        if !restored {
+            emit(["ok": false, "reason": "侧栏状态未还原；拒发", "actual_tab": actual,
+                  "sidebar_restored": false, "front_before": before, "front_after": front()], 2)
+        }
+        if success {
+            emit(["ok": true, "tab": actual, "sidebar_restored": true,
+                  "front_before": before, "front_after": front()])
+        }
+        emit(["ok": false, "reason": reason, "actual_tab": actual,
+              "sidebar_restored": true, "front_before": before, "front_after": front()], 2)
+    }
+    var targetState = initial
+    if expandedByUs {
+        let code = AXUIElementPerformAction(initial.recentButtons[0], kAXPressAction as CFString)
+        if code != .success { finishSwitch(false, tab(initial) ?? "无法判定", "展开最近分区失败") }
+        let revealDeadline = Date().addingTimeInterval(2)
+        repeat {
+            targetState = snapshot()
+            if recentExpanded(targetState) == true && !targetState.targetButtons.isEmpty { break }
+            if front() != before { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < revealDeadline
+        if targetState.targetButtons.isEmpty || recentExpanded(targetState) != true || front() != before {
+            finishSwitch(false, tab(targetState) ?? "无法判定", "目标会话按钮不存在（侧栏分区可能折叠）")
+        }
+    }
+    guard !targetState.targetButtons.isEmpty else { finishSwitch(false, tab(targetState) ?? "无法判定", "目标会话按钮不存在（侧栏分区可能折叠）") }
+    let pressed = AXUIElementPerformAction(targetState.targetButtons[0], kAXPressAction as CFString)
+    if pressed != .success { finishSwitch(false, tab(snapshot()) ?? "无法判定", "切页 AXPress 失败") }
     let switchDeadline = Date().addingTimeInterval(3)
     var actual = "无法判定"
     repeat {
         let current = snapshot()
         actual = tab(current) ?? "无法判定"
         if actual == title && current.areas.count == 1 && front() == before {
-            emit(["ok": true, "tab": actual, "front_before": before, "front_after": front()])
+            finishSwitch(true, actual, "")
         }
         if front() != before { break }
         Thread.sleep(forTimeInterval: 0.15)
     } while Date() < switchDeadline
-    let after = front()
-    emit(["ok": false, "reason": "切页后核对失败", "actual_tab": actual,
-          "front_before": before, "front_after": after], 2)
+    finishSwitch(false, actual, "切页后核对失败")
 }
 guard action == "send", !body.isEmpty else { refuse("操作或正文无效") }
 guard tab(initial) == title, string(window, kAXTitleAttribute) == title,
