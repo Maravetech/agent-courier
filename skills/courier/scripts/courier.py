@@ -12,6 +12,8 @@ App 里开着的会话要走界面通道（后台电脑操作工具），见上�
                                                轮询核对用户消息是否已写进记录（送达证据）
   codex_thread.py wait <ID或标题片段> --text <唯一投递片段> [--timeout 600]
                                                等对应投递后的首个回合结束，核对最终回复
+  codex_thread.py wait-number <完整ID> [--timeout 90]
+                                               新会话建成后等五位编号标题
   codex_thread.py watch <ID或标题片段>            持续输出开工 / 完成 / 中止 / 等待确认的变化
 
   codex_thread.py compose --from-agent <App或Agent> --from-session <编号> (--to <ID或标题> | --new) --file <正文> [--out <文件>]
@@ -356,7 +358,7 @@ def cmd_wait(a):
             f_tok, t_tok = parse_header(sent[0][2])
             expected_target = token(APP_TOKEN[APP], session_number(d.get("thread_name"), d["id"]))
             new_session_delivery = (APP == "codex" and t_tok == token("Codex", "新建")
-                                    and first_real_user(path) == sent[0][2])
+                                    and first_delivery_before_reply(path, sent[0][2]))
             if t_tok != expected_target and not new_session_delivery:
                 print(f"投递收件令牌与目标会话不符：{t_tok} != {expected_target}", file=sys.stderr)
                 return 1
@@ -426,15 +428,47 @@ def delivery_turn(path, text):
     return anchors, replies, done, running
 
 
-def first_real_user(path):
-    """Read only the first real Codex user message, excluding injected context records."""
+def first_delivery_before_reply(path, delivery):
+    """A new-session token is valid only for the first headed delivery before any reply."""
     for row in events(path):
         payload = row.get("payload") or {}
-        if row.get("type") == "response_item" and payload.get("type") == "message" and payload.get("role") == "user":
+        if row.get("type") == "event_msg" and payload.get("type") in ("task_complete", "turn_aborted"):
+            return False
+        if row.get("type") != "response_item" or payload.get("type") != "message":
+            continue
+        if payload.get("role") == "assistant":
+            return False
+        if payload.get("role") == "user":
             value = text_of(payload)
-            if is_real_user(value):
-                return value
-    return None
+            if parse_header(value):
+                return value == delivery
+    return False
+
+
+def cmd_wait_number(a):
+    """Wait until an exact Codex session ID receives its five-digit sidebar title."""
+    import re
+    if APP != "codex":
+        print("wait-number 仅支持 Codex 会话", file=sys.stderr)
+        return 2
+    deadline = time.monotonic() + max(0, a.timeout)
+    while True:
+        index = codex_index()
+        entry = index.get(a.key)
+        title = entry.get("thread_name", "") if entry else ""
+        match = re.match(r"^(\d{5}) ", title)
+        if match:
+            number = match.group(1)
+            if sum(bool(re.match(r"^" + number + r" ", x.get("thread_name", "")))
+                   for x in index.values()) != 1:
+                print(f"编号冲突：{number}", file=sys.stderr)
+                return 2
+            print(f"编号就绪：{number}  {title}  {a.key}")
+            return 0
+        if time.monotonic() >= deadline:
+            print(f"编号未就绪：{a.key}")
+            return 3
+        time.sleep(max(0.05, a.interval))
 
 
 def legacy_turn(path, since):
@@ -841,6 +875,25 @@ def cua_front():
     return [a.get("name") for a in apps if a.get("active")]
 
 
+def codex_frontmost():
+    """Fail closed if the active App cannot be identified by bundle ID."""
+    apps = json.loads(cua("list_apps", {}))["apps"]
+    active = [a for a in apps if a.get("active")]
+    if len(active) != 1 or not active[0].get("bundle_id"):
+        raise RuntimeError("前台 App 无法唯一确认")
+    return active[0]["bundle_id"] == CODEX_BUNDLE
+
+
+def wait_codex_background(timeout):
+    deadline = time.monotonic() + max(0, timeout)
+    while True:
+        if not codex_frontmost():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
+
+
 def cua_tab(pid, wid):
     return tab_from_tree(cua_tree(pid, wid, "AXRadioButton"))
 
@@ -892,8 +945,24 @@ def cmd_ui_switch(a):
         print("拒绝切页：必须给索引中唯一的完整标题")
         return 2
     if USE_NATIVE_AX:
-        result = native_ui_action("switch", a.title, window_id=getattr(a, "window_id", None))
+        deadline = time.monotonic() + max(0, getattr(a, "front_timeout", 30))
+        while True:
+            if not wait_codex_background(max(0, deadline - time.monotonic())):
+                print("Codex 在前台，用户可能正在使用；未切页")
+                return 2
+            result = native_ui_action("switch", a.title, window_id=getattr(a, "window_id", None))
+            if not (result.get("foreground") and not result.get("mutated")
+                    and time.monotonic() < deadline):
+                break
         if not result["ok"]:
+            if result.get("foreground"):
+                if result.get("mutated"):
+                    outcome = ("原页已恢复" if result.get("restored") is True else
+                               "原页未能确认恢复，请人工核对")
+                    print(f"Codex 在切页过程中到了前台；已中止；{outcome}")
+                else:
+                    print("Codex 在前台，用户可能正在使用；未切页")
+                return 2
             print(f"未切换：目标「{a.title}」，实际标签页「{result.get('actual_tab', '无法判定')}」；{result['reason']}")
             return 2
         print(f"已切换：标签页「{result['tab']}」  前台 {result['front_before']} → {result['front_after']}")
@@ -971,16 +1040,27 @@ def cmd_ui_send(a):
         print("拒发：正文收件令牌与目标会话不符", file=sys.stderr)
         return 2
     if USE_NATIVE_AX:
-        current = native_ui_action("tab", window_id=getattr(a, "window_id", None))
-        if not current["ok"] or current.get("tab") != a.expect_tab:
-            print(f"拒发：当前标签页是「{current.get('tab', '无法判定')}」，不是「{a.expect_tab}」；没有写入")
-            return 2
-        if parsed[1] != token("Codex", session_number(current["tab"], d["id"])):
-            print("拒发：投递抬头的收件编号与当前标签页编号不符；没有写入")
-            return 2
+        deadline = time.monotonic() + max(0, getattr(a, "front_timeout", 30))
         since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        result = native_ui_action("send", a.expect_tab, body, getattr(a, "window_id", None))
+        while True:
+            if not wait_codex_background(max(0, deadline - time.monotonic())):
+                print("Codex 在前台，用户可能正在使用；未切页；没有写入")
+                return 2
+            current = native_ui_action("tab", window_id=getattr(a, "window_id", None))
+            if not current["ok"] or current.get("tab") != a.expect_tab:
+                print(f"拒发：当前标签页是「{current.get('tab', '无法判定')}」，不是「{a.expect_tab}」；没有写入")
+                return 2
+            if parsed[1] != token("Codex", session_number(current["tab"], d["id"])):
+                print("拒发：投递抬头的收件编号与当前标签页编号不符；没有写入")
+                return 2
+            result = native_ui_action("send", a.expect_tab, body, getattr(a, "window_id", None))
+            if not (result.get("foreground") and not result.get("mutated")
+                    and time.monotonic() < deadline):
+                break
         if not result["ok"]:
+            if result.get("foreground") and not result.get("mutated"):
+                print("Codex 在前台，用户可能正在使用；未切页；没有写入")
+                return 2
             suffix = ("；送达结果不明，请用 verify 核对" if result.get("sent_possible") else
                       "；已还原" if result.get("restored") is True else
                       "；未还原：目标或输入框已变化，请人工核对" if result.get("restored") is False else "；没有写入")
@@ -1083,6 +1163,9 @@ def main():
     w = sub.add_parser("wait"); w.add_argument("key"); w.add_argument("--text"); w.add_argument("--since")
     w.add_argument("--timeout", type=int, default=600); w.add_argument("--interval", type=float, default=3)
     w.set_defaults(fn=cmd_wait)
+    wn = sub.add_parser("wait-number"); wn.add_argument("key")
+    wn.add_argument("--timeout", type=float, default=90); wn.add_argument("--interval", type=float, default=1)
+    wn.set_defaults(fn=cmd_wait_number)
     c = sub.add_parser("compose"); c.add_argument("--from-agent", required=True)
     c.add_argument("--from-session", required=True); c.add_argument("--to"); c.add_argument("--new", action="store_true")
     c.add_argument("--file", required=True); c.add_argument("--out"); c.set_defaults(fn=cmd_compose)
@@ -1091,8 +1174,10 @@ def main():
     ut = sub.add_parser("ui-tab"); ut.add_argument("--window-id", type=int)
     ut.add_argument("--lock-timeout", type=float, default=10); ut.set_defaults(fn=cmd_ui_tab)
     us = sub.add_parser("ui-switch"); us.add_argument("title"); us.add_argument("--window-id", type=int)
+    us.add_argument("--front-timeout", type=float, default=30)
     us.add_argument("--lock-timeout", type=float, default=10); us.set_defaults(fn=cmd_ui_switch)
     ud = sub.add_parser("ui-send"); ud.add_argument("--file", required=True); ud.add_argument("--session-id", required=True); ud.add_argument("--expect-tab", required=True); ud.add_argument("--window-id", type=int)
+    ud.add_argument("--front-timeout", type=float, default=30)
     ud.add_argument("--lock-timeout", type=float, default=10)
     ud.set_defaults(fn=cmd_ui_send)
     n = sub.add_parser("send"); n.add_argument("key", nargs="?"); n.add_argument("--file", required=True)
