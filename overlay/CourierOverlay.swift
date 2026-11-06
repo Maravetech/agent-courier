@@ -39,58 +39,115 @@ private final class OverlayView: NSView {
     var pairs: [RenderPair] = []
     var primaryTop: CGFloat = 0
     var globalOrigin: NSPoint = .zero
-    private var birds: [Int: NSImage] = [:]
-
+    private var birdImages: [CGImage] = []
+    private var birdLayers: [String: CALayer] = [:]
+    private var layerSignatures: [String: String] = [:]
+    private var lastReturn: [String: Bool] = [:]
     override var isOpaque: Bool { false }
-
     private func point(_ p: Point) -> NSPoint {
         NSPoint(x: p.x - globalOrigin.x, y: primaryTop - p.y - globalOrigin.y)
     }
-
     private func color(_ pair: Pair) -> NSColor {
         let bytes = Array((pair.from + ":" + pair.to).utf8)
         let hash = bytes.reduce(UInt32(2166136261)) { ($0 ^ UInt32($1)) &* 16777619 }
         return NSColor(calibratedHue: CGFloat(hash % 360) / 360, saturation: 0.78, brightness: 0.70, alpha: 0.98)
     }
+    private func geometry() -> [(RenderPair, NSPoint, NSPoint)] {
+        var offsets: [String: Int] = [:]
+        return pairs.map { rendered in
+            let key = "\(rendered.pair.from_app)·\(rendered.pair.from)"
+            let index = offsets[key, default: 0]
+            offsets[key] = index + 1
+            let home = point(rendered.source)
+            return (rendered, NSPoint(x: home.x - CGFloat(index) * 18, y: home.y), point(rendered.target))
+        }
+    }
 
-    private func bird(at p: NSPoint, color: NSColor, frame: Int, returning: Bool) {
-        if birds[frame] == nil, let url = Bundle.main.url(forResource: "bird-\(frame)", withExtension: "png") {
-            birds[frame] = NSImage(contentsOf: url)
+    func updateBirds() {
+        if pairs.isEmpty {
+            birdLayers.values.forEach { $0.removeFromSuperlayer() }
+            birdLayers.removeAll(); layerSignatures.removeAll(); lastReturn.removeAll()
+            return
         }
-        guard let image = birds[frame] else { return }
-        guard let context = NSGraphicsContext.current?.cgContext else { return }
-        context.saveGState()
-        if returning {
-            context.translateBy(x: 2 * p.x, y: 0)
-            context.scaleBy(x: -1, y: 1)
+        if birdImages.isEmpty {
+            birdImages = (0..<3).compactMap { index in
+                guard let url = Bundle.main.url(forResource: "bird-\(index)", withExtension: "png"),
+                      let image = NSImage(contentsOf: url) else { return nil }
+                return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            }
         }
-        let rect = NSRect(x: p.x - 18, y: p.y - 18, width: 36, height: 36)
-        context.beginTransparencyLayer(auxiliaryInfo: nil)
-        image.draw(in: rect)
-        context.setBlendMode(.sourceIn)
-        context.setFillColor(color.cgColor)
-        context.fill(rect)
-        context.endTransparencyLayer()
-        context.setFillColor(NSColor.white.cgColor)
-        context.fillEllipse(in: NSRect(x: p.x + 7, y: p.y + 3, width: 2.5, height: 2.5))
-        context.restoreGState()
+        guard birdImages.count == 3 else { return }
+        let now = Date().timeIntervalSince1970
+        let reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        var active: Set<String> = []
+        for (rendered, a, b) in geometry() {
+            let pair = rendered.pair
+            let key = "\(pair.from_app)·\(pair.from):\(pair.to_app)·\(pair.to)"
+            active.insert(key)
+            let previous = birdLayers[key]
+            let bird = previous ?? CALayer()
+            if previous == nil {
+                bird.bounds = CGRect(x: 0, y: 0, width: 36, height: 36)
+                let mask = CALayer(); mask.frame = bird.bounds; mask.contents = birdImages[0]
+                bird.mask = mask; layer?.addSublayer(bird); birdLayers[key] = bird
+            }
+            let returning = ["replied", "error", "wrong_header", "stuck", "archived_target"].contains(pair.state)
+            let elapsed = max(0, now - pair.updated_at)
+            let moving = !reducedMotion && (pair.state == "sending" || returning) && elapsed < 2.5 && !rendered.stayHome
+            let signature = "\(pair.state):\(pair.updated_at):\(a.x):\(a.y):\(b.x):\(b.y):\(moving)"
+            if layerSignatures[key] == signature { continue }
+            layerSignatures[key] = signature
+            bird.backgroundColor = (["error", "stuck"].contains(pair.state) ? NSColor.systemGray : pair.state == "wrong_header" ? NSColor.systemOrange : color(pair)).cgColor
+            let end = returning || ["idle", "pending"].contains(pair.state) || rendered.stayHome ? a : b
+            let start = returning ? b : a
+            let fraction = min(1, CGFloat(elapsed / 2.5))
+            let eased = fraction * fraction * (3 - 2 * fraction)
+            let initial = previous?.presentation()?.position ?? NSPoint(x: start.x + (end.x - start.x) * eased, y: start.y + (end.y - start.y) * eased)
+            bird.removeAnimation(forKey: "flight")
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            bird.position = end
+            CATransaction.commit()
+            if moving {
+                let flight = CABasicAnimation(keyPath: "position")
+                flight.fromValue = initial; flight.toValue = end
+                flight.duration = max(0.05, 2.5 - elapsed)
+                flight.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                bird.add(flight, forKey: "flight")
+            }
+            let transform = CATransform3DMakeScale(returning ? -1 : 1, 1, 1)
+            if previous != nil && returning != lastReturn[key, default: false] {
+                let turn = CABasicAnimation(keyPath: "transform")
+                turn.fromValue = bird.presentation()?.transform ?? bird.transform
+                turn.toValue = transform; turn.duration = 0.22
+                bird.add(turn, forKey: "turn")
+            }
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            bird.transform = transform
+            CATransaction.commit(); lastReturn[key] = returning
+            bird.mask?.removeAnimation(forKey: "wing")
+            bird.mask?.contents = birdImages[0]
+            if !reducedMotion && (moving || pair.state == "working") {
+                let wing = CAKeyframeAnimation(keyPath: "contents")
+                wing.values = moving ? [birdImages[0], birdImages[1], birdImages[2], birdImages[0]] : [birdImages[0], birdImages[1], birdImages[0], birdImages[0]]
+                wing.keyTimes = moving ? [0, 0.33, 0.66, 1] : [0, 0.05, 0.10, 1]
+                wing.duration = moving ? 0.5 : 2
+                wing.repeatCount = .infinity
+                bird.mask?.add(wing, forKey: "wing")
+            }
+        }
+        for key in birdLayers.keys where !active.contains(key) {
+            birdLayers.removeValue(forKey: key)?.removeFromSuperlayer()
+            layerSignatures.removeValue(forKey: key)
+            lastReturn.removeValue(forKey: key)
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
         NSGraphicsContext.current?.cgContext.clear(bounds)
-        let now = Date().timeIntervalSince1970
-        let reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        var sourceOffsets: [String: Int] = [:]
-        for rendered in pairs {
+        for (rendered, a, b) in geometry() {
             let pair = rendered.pair
             let tint = ["error", "stuck"].contains(pair.state) ? NSColor.systemGray :
                        pair.state == "wrong_header" ? NSColor.systemOrange : color(pair)
-            let sourceKey = "\(pair.from_app)·\(pair.from)"
-            let sourceIndex = sourceOffsets[sourceKey, default: 0]
-            sourceOffsets[sourceKey] = sourceIndex + 1
-            let offset = -CGFloat(sourceIndex) * 18
-            let base = point(rendered.source)
-            let a = NSPoint(x: base.x + offset, y: base.y), b = point(rendered.target)
             let path = NSBezierPath()
             path.move(to: a)
             path.line(to: b)
@@ -104,17 +161,6 @@ private final class OverlayView: NSView {
                 tint.setStroke()
                 ring.stroke()
             }
-            let elapsed = max(0, now - pair.updated_at)
-            let progress: CGFloat
-            if rendered.stayHome && pair.state == "archived_target" { progress = 0 }
-            else if !reducedMotion && pair.state == "sending" { progress = min(1, CGFloat(elapsed / 2.5)) }
-            else if !reducedMotion && ["replied", "error", "wrong_header", "stuck", "archived_target"].contains(pair.state) { progress = max(0, 1 - CGFloat(elapsed / 2.5)) }
-            else { progress = ["replied", "error", "wrong_header", "stuck", "archived_target", "idle", "pending"].contains(pair.state) ? 0 : 1 }
-            let eased = progress * progress * (3 - 2 * progress)
-            let birdPoint = NSPoint(x: a.x + (b.x - a.x) * eased, y: a.y + (b.y - a.y) * eased)
-            let moving = ["sending", "replied", "error", "wrong_header", "stuck", "archived_target"].contains(pair.state) && elapsed < 2.5
-            let wing = reducedMotion ? 0 : moving ? Int(now * 6) % 3 : pair.state == "working" && now.truncatingRemainder(dividingBy: 2) < 0.18 ? 1 : 0
-            bird(at: birdPoint, color: tint, frame: wing, returning: ["replied", "error", "wrong_header", "stuck", "archived_target"].contains(pair.state))
             let tag = "\(pair.from) → \(pair.to) · \(pair.state == "working" ? "工作中" : pair.state == "replied" ? "已回复" : pair.state == "sending" ? "投递中" : pair.state == "delivered" ? "已送达" : pair.state)"
             let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: tint]
             let tagSize = (tag as NSString).size(withAttributes: attrs)
@@ -133,11 +179,8 @@ private final class OverlayApp: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var toggleItem: NSMenuItem!
     private var loginItem: NSMenuItem!
-    private var redrawTimer: Timer?
-    private var redrawInterval: TimeInterval = 0
     private var locateTimer: Timer?
     private var fileSource: DispatchSourceFileSystemObject?
-    private var fileDescriptor: Int32 = -1
     private var probeHandle: FileHandle?
     private var previousFrontPID: Int32?
     private var activationObserver: NSObjectProtocol?
@@ -146,7 +189,6 @@ private final class OverlayApp: NSObject, NSApplicationDelegate {
     private var lastSnapshot = Data()
     private var lastLocate = TimeInterval(0)
     private var lastAnchors: [String: RenderPair] = [:]
-
     private func probe(_ kind: String, front: NSRunningApplication? = NSWorkspace.shared.frontmostApplication) {
         guard let probeHandle else { return }
         let frontPID = front?.processIdentifier
@@ -185,11 +227,12 @@ private final class OverlayApp: NSObject, NSApplicationDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.hidesOnDeactivate = false
         canvas = OverlayView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        canvas.wantsLayer = true
         let primary = NSScreen.screens.first?.frame ?? .zero
         canvas.primaryTop = primary.maxY
         panel.contentView = canvas
         setupMenu()
-        fileDescriptor = Darwin.open(stateURL.deletingLastPathComponent().path, O_EVTONLY)
+        let fileDescriptor = Darwin.open(stateURL.deletingLastPathComponent().path, O_EVTONLY)
         if fileDescriptor >= 0 {
             let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fileDescriptor, eventMask: [.write, .rename], queue: .main)
             source.setEventHandler { [weak self] in self?.reload() }
@@ -199,7 +242,7 @@ private final class OverlayApp: NSObject, NSApplicationDelegate {
         }
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.updateScreens()
+            self?.updatePanelFrame()
             self?.reload(force: true)
         }
         if let path = ProcessInfo.processInfo.environment["COURIER_OVERLAY_PROBE"] {
@@ -240,21 +283,18 @@ private final class OverlayApp: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
     }
-
     private var enabled: Bool {
         if ProcessInfo.processInfo.environment["COURIER_OVERLAY"] == "0" { return false }
         let url = stateURL.deletingLastPathComponent().appendingPathComponent("config.json")
         guard let data = try? Data(contentsOf: url), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Bool] else { return true }
         return value["enabled"] ?? true
     }
-
     @objc private func toggleDisplay() {
         let url = stateURL.deletingLastPathComponent().appendingPathComponent("config.json")
         let data = try? JSONSerialization.data(withJSONObject: ["enabled": !enabled])
         try? data?.write(to: url, options: .atomic)
         reload(force: true)
     }
-
     @objc private func toggleLogin() {
         do {
             if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
@@ -262,11 +302,7 @@ private final class OverlayApp: NSObject, NSApplicationDelegate {
             loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
         } catch { NSLog("Courier login item: %@", error.localizedDescription) }
     }
-
     @objc private func quitApp() { NSApp.terminate(nil) }
-
-    private func updateScreens() { updatePanelFrame() }
-
     private func updatePanelFrame() {
         guard !canvas.pairs.isEmpty else { return }
         canvas.primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
@@ -305,23 +341,14 @@ private final class OverlayApp: NSObject, NSApplicationDelegate {
             }
         }
         if pairs.isEmpty {
-            redrawTimer?.invalidate(); redrawTimer = nil
-            redrawInterval = 0
             locateTimer?.invalidate(); locateTimer = nil
-            canvas.pairs = []; panel.orderOut(nil); return
+            canvas.pairs = []; canvas.updateBirds(); panel.orderOut(nil); return
         }
         guard enabled else {
-            redrawTimer?.invalidate(); redrawTimer = nil; redrawInterval = 0
             locateTimer?.invalidate(); locateTimer = nil
-            canvas.pairs = []; panel.orderOut(nil); return
+            canvas.pairs = []; canvas.updateBirds(); panel.orderOut(nil); return
         }
         if locateTimer == nil { locateTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.reload() } }
-        let flying = pairs.contains { ["sending", "replied", "error", "wrong_header", "stuck", "archived_target"].contains($0.state) && now - $0.updated_at < 2.5 }
-        let interval = flying ? 1.0 / 60 : pairs.contains { $0.state == "working" } ? 0.1 : 0
-        if interval != redrawInterval {
-            redrawTimer?.invalidate(); redrawTimer = nil; redrawInterval = interval
-            if interval > 0 { redrawTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in self?.canvas.needsDisplay = true } }
-        }
         let fixture = ProcessInfo.processInfo.environment["COURIER_OVERLAY_FIXTURE"] == "1"
         canvas.pairs = pairs.compactMap { pair in
             let key = "\(pair.from_app)·\(pair.from):\(pair.to_app)·\(pair.to)"
@@ -336,11 +363,12 @@ private final class OverlayApp: NSObject, NSApplicationDelegate {
             return RenderPair(pair: pair, source: Point(x: a.x, y: a.y),
                               target: Point(x: b.x, y: b.y), stayHome: false)
         }
-        lastAnchors = Dictionary(uniqueKeysWithValues: canvas.pairs.map { rendered in
+        lastAnchors = Dictionary(canvas.pairs.map { rendered in
             let pair = rendered.pair
             return ("\(pair.from_app)·\(pair.from):\(pair.to_app)·\(pair.to)", rendered)
-        })
+        }, uniquingKeysWith: { _, newer in newer })
         updatePanelFrame()
+        canvas.updateBirds()
         if canvas.pairs.isEmpty {
             panel.orderOut(nil)
         } else if !panel.isVisible {
@@ -353,7 +381,7 @@ private final class OverlayApp: NSObject, NSApplicationDelegate {
         probe("exit")
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
-        redrawTimer?.invalidate(); locateTimer?.invalidate(); fileSource?.cancel()
+        locateTimer?.invalidate(); fileSource?.cancel()
         try? probeHandle?.close()
     }
 }

@@ -2,7 +2,6 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Darwin
-
 /// Per-app AX rules. Coordinates returned by AXPosition are global screen points,
 /// with the menu-bar screen's top-left as the origin.
 final class SidebarLocator {
@@ -11,58 +10,46 @@ final class SidebarLocator {
         let clip: CGRect
         let text: CGRect?
     }
-
     private let stateDirectory: URL
     private let bundles = ["Claude Code": "com.anthropic.claudefordesktop", "Codex": "com.openai.codex"]
     private var observers: [pid_t: AXObserver] = [:]
     private var activatedPIDs: Set<pid_t> = []
     private var onChange: (() -> Void)?
-
     init(stateDirectory: URL) {
         self.stateDirectory = stateDirectory
     }
-
     func authorized() -> Bool { AXIsProcessTrusted() }
-
     func observeChanges(_ callback: @escaping () -> Void) { onChange = callback }
-
     private func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
         var result: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success else { return nil }
         return result
     }
-
     private func string(_ element: AXUIElement, _ name: String) -> String? {
         attribute(element, name) as? String
     }
-
     private func children(_ element: AXUIElement) -> [AXUIElement] {
         attribute(element, kAXChildrenAttribute as String) as? [AXUIElement] ?? []
     }
-
     private func point(_ element: AXUIElement) -> CGPoint? {
         guard let raw = attribute(element, kAXPositionAttribute as String) else { return nil }
         let value = raw as! AXValue
         var point = CGPoint.zero
         return AXValueGetValue(value, .cgPoint, &point) ? point : nil
     }
-
     private func size(_ element: AXUIElement) -> CGSize? {
         guard let raw = attribute(element, kAXSizeAttribute as String) else { return nil }
         let value = raw as! AXValue
         var size = CGSize.zero
         return AXValueGetValue(value, .cgSize, &size) ? size : nil
     }
-
     private func frame(_ element: AXUIElement) -> CGRect? {
         guard let origin = point(element), let size = size(element) else { return nil }
         return CGRect(origin: origin, size: size)
     }
-
     private func bool(_ element: AXUIElement, _ name: String) -> Bool {
         (attribute(element, name) as? Bool) ?? false
     }
-
     private func visibleScreens() -> [CGRect] {
         guard let primary = NSScreen.screens.first else { return [] }
         return NSScreen.screens.map { screen in
@@ -70,7 +57,6 @@ final class SidebarLocator {
                    width: screen.frame.width, height: screen.frame.height)
         }
     }
-
     private func titleFrame(_ button: AXUIElement, number: String) -> CGRect? {
         var queue = children(button), budget = 80
         while !queue.isEmpty && budget > 0 {
@@ -85,7 +71,6 @@ final class SidebarLocator {
         }
         return nil
     }
-
     private func visibleWindows(pid: pid_t) -> [CGRect] {
         guard let rows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return [] }
         return rows.compactMap { row in
@@ -97,14 +82,12 @@ final class SidebarLocator {
             return CGRect(x: x, y: y, width: width, height: height)
         }
     }
-
     private func isOnCurrentScreen(_ frame: CGRect, visibleWindows: [CGRect]) -> Bool {
         visibleWindows.contains { visible in
             abs(visible.minX - frame.minX) < 8 && abs(visible.minY - frame.minY) < 8 &&
             abs(visible.width - frame.width) < 16 && abs(visible.height - frame.height) < 16
         }
     }
-
     private func walk(_ element: AXUIElement, pid: pid_t, app: String, number: String, window: CGRect,
                       clip: CGRect, underList: Bool, underWeb: Bool,
                       budget: inout Int, found: inout [Candidate]) {
@@ -133,7 +116,6 @@ final class SidebarLocator {
             if budget <= 0 { break }
         }
     }
-
     private func writeLog(app: String, number: String, hits: Int, selected: Candidate?, anchor: CGPoint?, note: String) {
         let file = stateDirectory.appendingPathComponent("locate.log")
         let chosen: Any = selected.map { ["x": $0.frame.minX, "y": $0.frame.minY,
@@ -195,7 +177,6 @@ final class SidebarLocator {
                  note: candidates.count > 1 ? "multiple_visible_topmost" : selected == nil ? "not_visible" : title == nil ? "fallback_padding" : "ok")
         return anchor
     }
-
     private func installObserver(pid: pid_t, element: AXUIElement) {
         if observers[pid] == nil {
             var observer: AXObserver?
