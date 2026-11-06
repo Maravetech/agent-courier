@@ -361,7 +361,9 @@ def cmd_wait(a):
                 print(f"投递收件令牌与目标会话不符：{t_tok} != {expected_target}", file=sys.stderr)
                 return 1
             want = reply_line(f_tok, t_tok)
-            got = t.splitlines()[0] if t else ""
+            # Markdown hard line breaks add spaces after the header. Keep every
+            # other character exact, including leading and internal whitespace.
+            got = t.splitlines()[0].rstrip() if t else ""
             if got != want:
                 print(f"回复抬头：❌ 缺或不符（应为「{want}」，实际「{got[:60]}」）")
                 return 1

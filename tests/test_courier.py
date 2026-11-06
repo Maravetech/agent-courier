@@ -117,6 +117,29 @@ class CourierTest(unittest.TestCase):
         self.assertIn("回复抬头：✅", out)
         self.assertIn("收到", out)
 
+    def test_wait_ignores_only_reply_header_trailing_whitespace(self):
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        original = Path(path).read_text(encoding='utf-8')
+        expected = '【回复】Codex·00159 → Claude Code·0007'
+        self.assertIn(expected, original)
+        def write_reply_header(first_line):
+            rows = [json.loads(line) for line in original.splitlines()]
+            for row in rows:
+                payload = row.get('payload', {})
+                if payload.get('role') == 'assistant':
+                    content = payload['content'][0]
+                    content['text'] = content['text'].replace(expected, first_line)
+            Path(path).write_text('\n'.join(json.dumps(row, ensure_ascii=False) for row in rows) + '\n', encoding='utf-8')
+        for first_line in (expected + '  ', expected + '\t'):
+            write_reply_header(first_line)
+            code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '0')
+            self.assertEqual(code, 0, out)
+            self.assertIn('回复抬头：✅', out)
+        for first_line in (' ' + expected, expected.replace(' → ', '  → ')):
+            write_reply_header(first_line)
+            code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '0')
+            self.assertEqual(code, 1, out)
+
     def test_wait_timeout(self):
         code, _ = self.run_cli("wait", TID, "--text", "missing-marker", "--timeout", "1", "--interval", "0.2")
         self.assertEqual(code, 3)
