@@ -42,6 +42,13 @@ if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "fixture" {
         }
     } else if mode == "button", let row = rows.first {
         if fixtureModel(row).2 >= 1 { answer = ["ok": true, "button_index": 0] }
+    } else if mode == "foreground", let row = rows.first {
+        let codex = row["codexFrontmost"] as? Bool ?? false
+        let mutated = row["mutated"] as? Bool ?? false
+        answer = codex ? ["ok": false, "foreground": true, "mutated": mutated,
+                          "reason": mutated ? "Codex 在切页过程中到了前台；已中止" :
+                              "Codex 在前台，用户可能正在使用；未切页"] :
+                         ["ok": true, "foreground": false]
     } else if mode == "sidebar", let first = rows.first {
         let decision = sidebarDecision(fixtureModel(first).2, first["recent"] as? Int ?? 0,
                                        first["recentExpanded"] as? Bool)
@@ -89,6 +96,7 @@ guard let expectedPID = Int32(CommandLine.arguments[3]) else { refuse("PID 无�
 let bounds = CommandLine.arguments[4...7].compactMap(Double.init)
 guard bounds.count == 4 else { refuse("窗口边界无效") }
 let sendLabels = Set(CommandLine.arguments[8].split(separator: ",").map(String.init))
+let codexBundle = "com.openai.codex"
 let stopLabels = Set(["停止", "Stop", "停止する", "Stopp", "Arrêter", "Detener"])
 let body = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
 let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
@@ -118,10 +126,12 @@ struct Snapshot {
     var sends: [AXUIElement] = []
     var stops: [AXUIElement] = []
     var targetButtons: [AXUIElement] = []
+    var originalButtons: [AXUIElement] = []
     var recentButtons: [AXUIElement] = []
     var count = 0
     var truncated = false
 }
+var originalTitle = ""
 func snapshot() -> Snapshot {
     var result = Snapshot()
     func walk(_ element: AXUIElement, _ depth: Int, _ inToolbar: Bool) {
@@ -145,6 +155,7 @@ func snapshot() -> Snapshot {
             if sendLabels.contains(label) { result.sends.append(element) }
             if stopLabels.contains(label) { result.stops.append(element) }
             if label == title { result.targetButtons.append(element) }
+            if !originalTitle.isEmpty && label == originalTitle { result.originalButtons.append(element) }
             if label == "最近" || label == "Recent" { result.recentButtons.append(element) }
         }
         if let children = value(element, kAXChildrenAttribute) as? [AXUIElement] {
@@ -156,6 +167,13 @@ func snapshot() -> Snapshot {
     return result
 }
 func front() -> String { NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "" }
+func foregroundRefusal(_ mutated: Bool, _ restored: Bool? = nil) -> Never {
+    var fields: [String: Any] = ["ok": false, "foreground": true, "mutated": mutated,
+                                 "reason": mutated ? "Codex 在切页过程中到了前台；已中止" :
+                                     "Codex 在前台，用户可能正在使用；未切页"]
+    if let restored = restored { fields["restored"] = restored }
+    emit(fields, 2)
+}
 func tab(_ state: Snapshot) -> String? {
     resolvedTitle(string(window, kAXTitleAttribute), state.toolbars, state.toolbarTexts,
                   state.tabs.map { string($0, kAXTitleAttribute) })
@@ -166,6 +184,9 @@ func recentExpanded(_ state: Snapshot) -> Bool? {
     return number.boolValue
 }
 let before = front()
+if (action == "switch" || action == "send") && before == codexBundle {
+    foregroundRefusal(false)
+}
 let deadline = Date().addingTimeInterval(4)
 var initial = snapshot()
 func ready(_ state: Snapshot) -> Bool {
@@ -187,17 +208,46 @@ if action == "tab" {
     emit(["ok": true, "tab": current, "front_before": before, "front_after": front()])
 }
 if action == "switch" {
+    originalTitle = tab(initial) ?? ""
     let decision = sidebarDecision(initial.targetButtons.count, initial.recentButtons.count,
                                    recentExpanded(initial))
     guard decision != "missing" else { refuse("目标会话按钮不存在（侧栏分区可能折叠）") }
     let expandedByUs = decision == "expand_recent"
+    var mutated = false
+    func revertAfterForeground() -> Never {
+        var reverted = !mutated
+        if mutated && !originalTitle.isEmpty && originalTitle != title {
+            let state = snapshot()
+            if tab(state) == originalTitle { reverted = true }
+            else if tab(state) == title && state.originalButtons.count == 1 &&
+                    state.areas.count == 1 && string(state.areas[0], kAXValueAttribute).isEmpty {
+                if AXUIElementPerformAction(state.originalButtons[0], kAXPressAction as CFString) == .success {
+                    let limit = Date().addingTimeInterval(2)
+                    repeat {
+                        if tab(snapshot()) == originalTitle { reverted = true; break }
+                        Thread.sleep(forTimeInterval: 0.1)
+                    } while Date() < limit
+                }
+            }
+        }
+        if expandedByUs {
+            let state = snapshot()
+            if state.recentButtons.count == 1 && recentExpanded(state) == true {
+                _ = AXUIElementPerformAction(state.recentButtons[0], kAXPressAction as CFString)
+            }
+        }
+        foregroundRefusal(mutated, reverted)
+    }
     func restoreRecent() -> Bool {
         if !expandedByUs { return true }
+        if front() == codexBundle { revertAfterForeground() }
         var state = snapshot()
         guard state.recentButtons.count == 1 else { return false }
         if recentExpanded(state) == true {
+            if front() == codexBundle { revertAfterForeground() }
             let code = AXUIElementPerformAction(state.recentButtons[0], kAXPressAction as CFString)
             if code != .success { return false }
+            if front() == codexBundle { revertAfterForeground() }
         }
         let deadline = Date().addingTimeInterval(2)
         repeat {
@@ -208,6 +258,7 @@ if action == "switch" {
         return false
     }
     func finishSwitch(_ success: Bool, _ actual: String, _ reason: String) -> Never {
+        if front() == codexBundle { revertAfterForeground() }
         let restored = restoreRecent()
         if !restored {
             emit(["ok": false, "reason": "侧栏状态未还原；拒发", "actual_tab": actual,
@@ -228,12 +279,16 @@ if action == "switch" {
     }
     var targetState = initial
     if expandedByUs {
+        if front() == codexBundle { foregroundRefusal(false) }
         let code = AXUIElementPerformAction(initial.recentButtons[0], kAXPressAction as CFString)
+        if code == .success { mutated = true }
+        if front() == codexBundle { revertAfterForeground() }
         if code != .success { finishSwitch(false, tab(initial) ?? "无法判定", "展开最近分区失败") }
         let revealDeadline = Date().addingTimeInterval(2)
         repeat {
             targetState = snapshot()
             if recentExpanded(targetState) == true && !targetState.targetButtons.isEmpty { break }
+            if front() == codexBundle { revertAfterForeground() }
             if front() != before { break }
             Thread.sleep(forTimeInterval: 0.1)
         } while Date() < revealDeadline
@@ -242,7 +297,10 @@ if action == "switch" {
         }
     }
     guard !targetState.targetButtons.isEmpty else { finishSwitch(false, tab(targetState) ?? "无法判定", "目标会话按钮不存在（侧栏分区可能折叠）") }
+    if front() == codexBundle { revertAfterForeground() }
     let pressed = AXUIElementPerformAction(targetState.targetButtons[0], kAXPressAction as CFString)
+    if pressed == .success { mutated = true }
+    if front() == codexBundle { revertAfterForeground() }
     if pressed != .success { finishSwitch(false, tab(snapshot()) ?? "无法判定", "切页 AXPress 失败") }
     let switchDeadline = Date().addingTimeInterval(3)
     var actual = "无法判定"
@@ -252,6 +310,7 @@ if action == "switch" {
         if actual == title && current.areas.count == 1 && front() == before {
             finishSwitch(true, actual, "")
         }
+        if front() == codexBundle { revertAfterForeground() }
         if front() != before { break }
         Thread.sleep(forTimeInterval: 0.15)
     } while Date() < switchDeadline
@@ -281,18 +340,19 @@ func restore(_ reason: String) -> Never {
          string(read.areas[0], kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) == placeholder)
     refuse(reason, restored: code == .success && cleared)
 }
+if front() == codexBundle { foregroundRefusal(false) }
 guard front() == before, tab(snapshot()) == title else { refuse("写入前标签或前台已变化") }
 let written = AXUIElementSetAttributeValue(area, kAXValueAttribute as CFString, body as CFTypeRef)
 Thread.sleep(forTimeInterval: 0.2)
 guard written == .success else { restore("AXValue 写入失败") }
-guard front() == before else { restore("AXValue 改变了前台 App") }
+guard front() == before && front() != codexBundle else { restore("AXValue 改变了前台 App") }
 let ready = snapshot()
 guard tab(ready) == title, string(window, kAXTitleAttribute) == title,
       ready.areas.count == 1, string(ready.areas[0], kAXValueAttribute) == body,
       ready.stops.isEmpty else { restore("写入后标签、正文或回合状态不符") }
 guard ready.sends.count == 1 else { restore("发送按钮不唯一或不存在") }
 let final = snapshot()
-guard front() == before, tab(final) == title, string(window, kAXTitleAttribute) == title,
+guard front() == before && front() != codexBundle, tab(final) == title, string(window, kAXTitleAttribute) == title,
       final.areas.count == 1, string(final.areas[0], kAXValueAttribute) == body,
       final.sends.count == 1, final.stops.isEmpty else { restore("发送前标签、正文或按钮已变化") }
 let pressed = AXUIElementPerformAction(final.sends[0], kAXPressAction as CFString)

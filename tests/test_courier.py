@@ -117,6 +117,106 @@ class CourierTest(unittest.TestCase):
         self.assertIn("回复抬头：✅", out)
         self.assertIn("收到", out)
 
+    def test_wait_accepts_new_token_after_bootstrap_user_before_first_reply(self):
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        rows = [msg('2026-01-02T00:00:00Z', 'user', 'bootstrap instructions'),
+                msg('2026-01-02T00:00:01Z', 'user', '【投递】Claude Code·0064 → Codex·新建\n\nnew-token-marker'),
+                msg('2026-01-02T00:00:02Z', 'assistant', '【回复】Codex·新建 → Claude Code·0064\n收到'),
+                line('2026-01-02T00:00:03Z', 'event_msg', {'type': 'task_complete'})]
+        Path(path).write_text('\n'.join(rows) + '\n', encoding='utf-8')
+        code, out = self.run_cli('wait', TID, '--text', 'new-token-marker', '--timeout', '0')
+        self.assertEqual(code, 0, out)
+        self.assertIn('回复抬头：✅ 【回复】Codex·新建 → Claude Code·0064', out)
+        rows.insert(1, msg('2026-01-02T00:00:00.500Z', 'assistant', 'older reply'))
+        Path(path).write_text('\n'.join(rows) + '\n', encoding='utf-8')
+        code, out = self.run_cli('wait', TID, '--text', 'new-token-marker', '--timeout', '0')
+        self.assertEqual(code, 1, out)
+
+    def test_wait_number_polls_index_until_five_digit_title(self):
+        index = Path(self.tmp.name, 'session_index.jsonl')
+        with index.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'id': TID, 'thread_name': '新建测试'}) + '\n')
+        code, out = self.run_cli('wait-number', TID, '--timeout', '0')
+        self.assertEqual(code, 3, out)
+        self.assertIn('编号未就绪', out)
+        proc = subprocess.Popen([sys.executable, '-I', SCRIPT, 'wait-number', TID,
+                                 '--timeout', '2', '--interval', '0.05'],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self.env)
+        time.sleep(0.2)
+        with index.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'id': TID, 'thread_name': '00159 test target'}) + '\n')
+        out, err = proc.communicate(timeout=3)
+        self.assertEqual(proc.returncode, 0, out + err)
+        self.assertIn('00159 test target', out)
+
+    def test_frontmost_codex_blocks_ui_switch_before_ax_action(self):
+        args = SimpleNamespace(title='00159 test target', window_id=None, front_timeout=0)
+        output = io.StringIO()
+        with patch.object(courier, 'USE_NATIVE_AX', True), \
+             patch.object(courier, 'CODEX', self.tmp.name), \
+             patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'codex_frontmost', return_value=True, create=True), \
+             patch.object(courier, 'native_ui_action', side_effect=AssertionError('AX action must not run')), \
+             redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_switch(args), 2)
+        self.assertIn('Codex 在前台，用户可能正在使用；未切页', output.getvalue())
+
+    def test_frontmost_codex_blocks_ui_send_before_ax_action(self):
+        body = self.write('front-body.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
+        args = SimpleNamespace(file=body, session_id=TID, expect_tab='00159 test target',
+                               window_id=None, front_timeout=0)
+        output = io.StringIO()
+        with patch.object(courier, 'USE_NATIVE_AX', True), \
+             patch.object(courier, 'CODEX', self.tmp.name), \
+             patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'codex_frontmost', return_value=True, create=True), \
+             patch.object(courier, 'native_ui_action', side_effect=AssertionError('AX action must not run')), \
+             redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_send(args), 2)
+        self.assertIn('Codex 在前台，用户可能正在使用；未切页', output.getvalue())
+
+    def test_frontmost_guard_waits_then_switches_in_background(self):
+        args = SimpleNamespace(title='00159 test target', window_id=None, front_timeout=1)
+        reply = {'ok': True, 'tab': args.title, 'front_before': 'Chrome', 'front_after': 'Chrome'}
+        with patch.object(courier, 'USE_NATIVE_AX', True), \
+             patch.object(courier, 'CODEX', self.tmp.name), \
+             patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'codex_frontmost', side_effect=[True, False]) as front, \
+             patch.object(courier, 'native_ui_action', return_value=reply) as native, \
+             patch.object(courier.time, 'sleep'):
+            self.assertEqual(courier.cmd_ui_switch(args), 0)
+        self.assertEqual(front.call_count, 2)
+        native.assert_called_once()
+
+    def test_frontmost_mid_switch_reports_unconfirmed_rollback(self):
+        args = SimpleNamespace(title='00159 test target', window_id=None, front_timeout=0)
+        output = io.StringIO()
+        reply = {'ok': False, 'foreground': True, 'mutated': True, 'restored': False,
+                 'reason': 'Codex 在切页过程中到了前台；已中止'}
+        with patch.object(courier, 'USE_NATIVE_AX', True), \
+             patch.object(courier, 'CODEX', self.tmp.name), \
+             patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'codex_frontmost', return_value=False), \
+             patch.object(courier, 'native_ui_action', return_value=reply), \
+             redirect_stdout(output):
+            self.assertEqual(courier.cmd_ui_switch(args), 2)
+        self.assertIn('原页未能确认恢复', output.getvalue())
+        self.assertNotIn('未切页', output.getvalue())
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'Swift AX fixture requires macOS')
+    def test_native_ax_foreground_fixture_refuses_before_and_after_mutation(self):
+        script = Path(__file__).resolve().parents[1] / 'skills/courier/scripts/codex_ax.swift'
+        for mutated in (False, True):
+            result = subprocess.run(['swift', str(script), 'fixture'],
+                                    input=json.dumps({'mode': 'foreground', 'snapshots': [
+                                        {'codexFrontmost': True, 'mutated': mutated}]}),
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            data = json.loads(result.stdout)
+            self.assertTrue(data['foreground'])
+            self.assertEqual(data['mutated'], mutated)
+            self.assertIn('已中止' if mutated else '未切页', data['reason'])
+
     def test_wait_ignores_only_reply_header_trailing_whitespace(self):
         path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
         original = Path(path).read_text(encoding='utf-8')
@@ -766,6 +866,7 @@ class CourierTest(unittest.TestCase):
         with patch.object(courier, 'USE_NATIVE_AX', True), \
              patch.object(courier, 'CODEX', self.tmp.name), \
              patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'codex_frontmost', return_value=False), \
              patch.object(courier, 'native_ui_action', return_value=reply), redirect_stdout(output):
             self.assertEqual(courier.cmd_ui_switch(args), 2)
         self.assertIn('实际标签页「00160 archived one」', output.getvalue())
@@ -782,6 +883,7 @@ class CourierTest(unittest.TestCase):
         with patch.object(courier, 'USE_NATIVE_AX', True), \
              patch.object(courier, 'CODEX', self.tmp.name), \
              patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'codex_frontmost', return_value=False), \
              patch.object(courier, 'native_ui_action', side_effect=native), redirect_stdout(output):
             self.assertEqual(courier.cmd_ui_send(args), 2)
         self.assertEqual(calls[1], ('send', args.expect_tab, Path(body).read_text(), 111))
@@ -796,6 +898,7 @@ class CourierTest(unittest.TestCase):
         with patch.object(courier, 'USE_NATIVE_AX', True), \
              patch.object(courier, 'CODEX', self.tmp.name), \
              patch.object(courier, 'INDEX', os.path.join(self.tmp.name, 'session_index.jsonl')), \
+             patch.object(courier, 'codex_frontmost', return_value=False), \
              patch.object(courier, 'native_ui_action', side_effect=answers) as native:
             self.assertEqual(courier.cmd_ui_send(args), 0)
         self.assertEqual([call.args[0] for call in native.call_args_list], ['tab', 'send'])

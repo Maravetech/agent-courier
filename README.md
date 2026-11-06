@@ -70,6 +70,10 @@ python3 -I $C watch <ID>             # stream start / complete / abort / waiting
 
 `ui-send` is for existing indexed sessions. Use Computer use or `send --new` to create a session. `find`, `status`, `verify`, `wait`, and `watch` read all rollout segments for one session ID in timestamp order, including files with a `_segment-id` suffix. `wait` anchors to the matching delivery message, even if you start waiting after its turn has ended. A failed or mismatched reply exits nonzero. The offline tests do not prove real Codex UI delivery.
 
+After `locate` finds a new session ID, run `wait-number <ID> --timeout 90` before using its five-digit number. It polls the session index and returns `编号未就绪` if the title is still unnumbered. The first `Codex·新建` delivery remains valid even when the new session has a bootstrap user message before that delivery, provided there was no earlier headed delivery or assistant reply.
+
+`ui-switch` and `ui-send` wait up to 30 seconds for Codex to leave the foreground (`--front-timeout <seconds>` adjusts this). If Codex stays frontmost, they do not switch or write. The native bridge checks again just before AX actions. If Codex comes forward during a switch, the operation stops and attempts to restore the original tab; an unconfirmed restoration is reported explicitly.
+
 `verify` polls for up to 30 seconds by default because the session log may lag after Send returns. Use `--timeout 0` for a single immediate check.
 
 `send --new` does not set the Codex App title or guarantee a numbered sidebar title. The installed `codex-cli 0.160.0` has no title option on `codex exec` and no CLI rename command; use a supported App session-title tool or rename the new chat in the App, then read the title back before using its number. Do not edit `~/.codex/session_index.jsonl` to rename it. The first `Codex·新建` delivery can still be verified by `wait` after the App auto-generates a title.
