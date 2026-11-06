@@ -17,7 +17,7 @@
 | 通道 | 工具 | 能投到哪里 | 截图 |
 | --- | --- | --- | --- |
 | 前端主通道 | Claude Computer use（后台 `app_*` 工具） | Codex App 里的任意会话，包括新建会话 | 写入或点击前截一张 0.1 倍的小图 |
-| 前端备用通道 | Swift 原生 macOS AX 控件操作，配合 [cua-driver](https://github.com/trycua/cua) 获取屏上窗口边界（`ui-*` 命令） | 同上 | 不截图 |
+| 前端备用通道 | Swift 原生 macOS AX 控件操作，配合 [cua-driver](https://github.com/trycua/cua) 发现屏上窗口 ID，再按 ID 绑定 AX 窗口（`ui-*` 命令） | 同上 | 不截图 |
 | 命令行兜底 | `codex exec` | 新建会话，以及 App 从没加载过的会话 | 不截图 |
 
 ## 安全设计

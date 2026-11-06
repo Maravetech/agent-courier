@@ -17,7 +17,7 @@
 | Channel | Tool | Reaches | Screenshots |
 | --- | --- | --- | --- |
 | Front end, primary | Claude Computer use (background `app_*` tools) | Any session in the Codex app, including new ones | One tiny 0.1-scale capture before a write or click |
-| Front end, fallback | native macOS AX via Swift, with [cua-driver](https://github.com/trycua/cua) for on-screen window geometry (`ui-*` commands) | Same | None |
+| Front end, fallback | native macOS AX via Swift, with [cua-driver](https://github.com/trycua/cua) for window ID discovery (`ui-*` commands); the bridge binds the AX window by ID | Same | None |
 | CLI, last resort | `codex exec` | New sessions, and sessions the app never loaded | None |
 
 ## Safety
