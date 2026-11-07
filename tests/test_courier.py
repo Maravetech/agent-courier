@@ -902,7 +902,7 @@ CID = "aaaaaaaa-1111-4222-8333-444444444444"
 
 
 class ClaudeBackendTest(unittest.TestCase):
-    """Claude side is read-only: find / status / verify / wait / watch against a fake ~/.claude."""
+    """Claude send and round-trip checks against a fake ~/.claude."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -968,6 +968,117 @@ class ClaudeBackendTest(unittest.TestCase):
 
     def test_front_end_refused_for_claude(self):
         self.assertEqual(self.cli("ui-tab")[0], 2)
+
+    def test_peer_message_is_unwrapped_for_verify_and_wait(self):
+        path = Path(self.env['CLAUDE_CONFIG_DIR']) / 'projects' / '-tmp-proj' / f'{CID}.jsonl'
+        body = '【投递】Codex·00159 → Claude Code·0009\n\nRT-X2C-fixture'
+        wrapped = ('Another Claude session sent a message:\n'
+                   '<cross-session-message from="uds:/tmp/test.sock" from-name="test" from-mode="prompting">\n'
+                   + body + '\n</cross-session-message>\n\nThis came from another Claude session.')
+        rows = [
+            {'type': 'user', 'timestamp': '2026-01-03T00:00:01Z', 'isMeta': True,
+             'turnOrigin': 'peer', 'message': {'role': 'user', 'content': wrapped}},
+            {'type': 'assistant', 'timestamp': '2026-01-03T00:00:02Z',
+             'message': {'role': 'assistant', 'stop_reason': 'end_turn',
+                         'content': [{'type': 'text', 'text': '【回复】Claude Code·0009 → Codex·00159\n收到'}]}},
+        ]
+        with path.open('a', encoding='utf-8') as f:
+            f.write(''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in rows))
+        code, out = self.cli('verify', CID, '--text', 'RT-X2C-fixture', '--timeout', '0')
+        self.assertEqual(code, 0, out)
+        code, out = self.cli('wait', CID, '--text', 'RT-X2C-fixture', '--timeout', '0')
+        self.assertEqual(code, 0, out)
+        self.assertIn('回复抬头：✅', out)
+        code, out = self.cli('watch', CID, '--stream', '--timeout', '0')
+        self.assertEqual(code, 0, out)
+        self.assertEqual([line.split(' ', 1)[1] for line in out.strip().splitlines()][-2:],
+                         ['开工', '完成'])
+
+    def test_claude_send_requires_exact_header_and_single_matching_receipt(self):
+        body = '【投递】Codex·00159 → Claude Code·0009\n\nRT-X2C-fixture\n'
+        body_path = Path(self.tmp.name) / 'out.txt'
+        body_path.write_text(body, encoding='utf-8')
+        args = SimpleNamespace(key=CID, file=str(body_path), new=False)
+        target = '0009 review'
+        def fake_run(argv, **kwargs):
+            self.assertEqual(argv[:2], ['claude', '-p'])
+            self.assertIn('--allowedTools', argv)
+            self.assertIn('--tools', argv)
+            prompt = argv[2]
+            payload = json.loads(prompt.split('\n', 1)[1])
+            self.assertEqual(payload, {'to': target, 'message': body})
+            stream = [
+                {'type': 'assistant', 'message': {'content': [
+                    {'type': 'tool_use', 'id': 'use-1', 'name': 'SendMessage',
+                     'input': {'to': target, 'message': body}}]}},
+                {'type': 'user', 'message': {'content': [
+                    {'type': 'tool_result', 'tool_use_id': 'use-1',
+                     'content': [{'type': 'text', 'text': '{"success":true,"msg_id":"receipt-1"}'}]}]}},
+            ]
+            return SimpleNamespace(returncode=0, stdout='\n'.join(json.dumps(x, ensure_ascii=False) for x in stream), stderr='')
+        output = io.StringIO()
+        with patch.object(courier, 'APP', 'claude'), \
+             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
+             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
+             patch.object(courier, 'claude_account_ready', return_value=(True, '')), \
+             patch.object(subprocess, 'run', side_effect=fake_run) as run, redirect_stdout(output):
+            self.assertEqual(courier.cmd_send_claude(args), 0)
+        run.assert_called_once()
+        self.assertIn('receipt-1', output.getvalue())
+        self.assertIn('verify', output.getvalue())
+        body_path.write_text(body.replace('Claude Code·0009', 'Claude Code·0010'), encoding='utf-8')
+        with patch.object(courier, 'APP', 'claude'), \
+             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
+             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
+             patch.object(subprocess, 'run', side_effect=AssertionError('must not send')):
+            self.assertEqual(courier.cmd_send_claude(args), 2)
+
+    def test_claude_account_gate_requires_live_login_and_matching_ids(self):
+        desktop = Path(self.tmp.name) / 'Library/Application Support/Claude/config.json'
+        desktop.parent.mkdir(parents=True)
+        desktop.write_text(json.dumps({'lastKnownAccountUuid': 'same'}))
+        cli = Path(self.tmp.name) / '.claude.json'
+        cli.write_text(json.dumps({'oauthAccount': {'accountUuid': 'same', 'emailAddress': 'x@example.test'}}))
+        status = SimpleNamespace(returncode=0, stdout=json.dumps({'loggedIn': True, 'email': 'x@example.test'}))
+        with patch.dict(os.environ, {'HOME': self.tmp.name}), patch.object(subprocess, 'run', return_value=status):
+            self.assertEqual(courier.claude_account_ready(), (True, ''))
+            cli.write_text(json.dumps({'oauthAccount': {'accountUuid': 'other', 'emailAddress': 'x@example.test'}}))
+            self.assertFalse(courier.claude_account_ready()[0])
+            status.stdout = json.dumps({'loggedIn': False})
+            self.assertFalse(courier.claude_account_ready()[0])
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'not-a-real-key'}), \
+             patch.object(subprocess, 'run', side_effect=AssertionError('must not call CLI')):
+            self.assertFalse(courier.claude_account_ready()[0])
+
+    def test_sendmessage_receipt_rejects_prose_multiple_calls_and_rewrites(self):
+        to, body = '0009 review', '【投递】Codex·00159 → Claude Code·0009\n\nmarker'
+        call = {'type': 'assistant', 'message': {'content': [
+            {'type': 'tool_use', 'id': 'u1', 'name': 'SendMessage', 'input': {'to': to, 'message': body}}]}}
+        result = {'type': 'user', 'message': {'content': [
+            {'type': 'tool_result', 'tool_use_id': 'u1', 'content': '{"success":true,"msg_id":"m1"}'}]}}
+        stream = '\n'.join(json.dumps(x, ensure_ascii=False) for x in (call, result))
+        self.assertEqual(courier.sendmessage_receipt(stream, to, body), ('m1', ''))
+        call['message']['content'][0]['input'].update({'recipient': to, 'summary': 'fixture summary'})
+        stream = '\n'.join(json.dumps(x, ensure_ascii=False) for x in (call, result))
+        self.assertEqual(courier.sendmessage_receipt(stream, to, body), ('m1', ''))
+        call['message']['content'][0]['input']['recipient'] = 'other session'
+        self.assertIsNone(courier.sendmessage_receipt('\n'.join(json.dumps(x, ensure_ascii=False)
+                          for x in (call, result)), to, body)[0])
+        call['message']['content'][0]['input']['recipient'] = to
+        self.assertIsNone(courier.sendmessage_receipt('success:true msg_id:m1', to, body)[0])
+        self.assertIsNone(courier.sendmessage_receipt(stream + '\n' + json.dumps(call), to, body)[0])
+        self.assertIsNone(courier.sendmessage_receipt(stream, to, body + 'changed')[0])
+
+    def test_claude_send_account_mismatch_never_starts_delivery_cli(self):
+        body_path = Path(self.tmp.name) / 'out.txt'
+        body_path.write_text('【投递】Codex·00159 → Claude Code·0009\n\nmarker', encoding='utf-8')
+        args = SimpleNamespace(key=CID, file=str(body_path), new=False)
+        with patch.object(courier, 'APP', 'claude'), \
+             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
+             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
+             patch.object(courier, 'claude_account_ready', return_value=(False, '账号不一致')), \
+             patch.object(subprocess, 'run', side_effect=AssertionError('must not send')):
+            self.assertEqual(courier.cmd_send_claude(args), 2)
 
 
 

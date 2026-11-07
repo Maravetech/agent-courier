@@ -4,7 +4,7 @@
 
 [中文说明](README.zh-CN.md)
 
-**Courier (投递)** lets one AI agent deliver a message into a chosen session of the **Codex desktop app** on macOS, confirm delivery from the session log, read the reply, and keep the task going, all **without stealing your keyboard or mouse focus**.
+**Courier (投递)** delivers messages to chosen **Codex or Claude Code sessions** on macOS, confirms delivery from local session logs, and reads the reply. Codex UI delivery runs in the background without stealing your keyboard or mouse focus.
 
 > Unofficial community project. Not affiliated with, endorsed by, or supported by OpenAI or Anthropic. "Codex", "ChatGPT" and "Claude" are trademarks of their respective owners.
 
@@ -12,13 +12,14 @@
 
 - **Front end sends.** The agent switches to the target session in the Codex app, writes the message into the input box and presses send, through background macOS Accessibility actions. It works for any session, including a new one.
 - **Back end confirms.** The agent reads `~/.codex` session logs directly (read-only), so checking delivery and reading replies costs a few lines of text, not screenshots.
-- **Identity tokens.** Every message starts with `【投递】<sender>·<session> → Codex·<session>` and every reply with `【回复】Codex·<session> → <sender>·<session>`, so it is always clear who sent what to whom.
+- **Identity tokens.** Every message starts with `【投递】<sender>·<session> → <receiver>·<session>` and every reply reverses the tokens with `【回复】`, so it is clear who sent what to whom.
 
 | Channel | Tool | Reaches | Screenshots |
 | --- | --- | --- | --- |
 | Front end, primary | Claude Computer use (background `app_*` tools) | Any session in the Codex app, including new ones | One tiny 0.1-scale capture before a write or click |
 | Front end, fallback | native macOS AX via Swift, with [cua-driver](https://github.com/trycua/cua) for window ID discovery (`ui-*` commands); the bridge binds the AX window by ID | Same | None |
 | CLI, last resort | `codex exec` | New sessions, and sessions the app never loaded | None |
+| Claude session send | `claude -p` with one `SendMessage` call | An existing, uniquely numbered Claude Code session | None |
 
 ## Safety
 
@@ -69,6 +70,8 @@ python3 -I $C watch <ID>             # stream start / complete / abort / waiting
 ```
 
 `ui-send` is for existing indexed sessions. Use Computer use or `send --new` to create a session. `find`, `status`, `verify`, `wait`, and `watch` read all rollout segments for one session ID in timestamp order, including files with a `_segment-id` suffix. `wait` anchors to the matching delivery message, even if you start waiting after its turn has ended. A failed or mismatched reply exits nonzero. The offline tests do not prove real Codex UI delivery.
+
+**Codex → Claude Code:** `--app claude find <number or exact title>` → `status <ID> -n 0` → `compose --from-agent Codex --from-session <five-digit number> --to <Claude ID> --file body.txt --out msg.txt` → `--app claude send <Claude ID> --file msg.txt` → `--app claude verify <ID> --text <unique marker>` → `--app claude wait <ID> --text <unique marker>`. The CLI must be signed in to the same account as the Claude desktop App; missing or mismatched account IDs refuse before sending. The SendMessage tool result must contain `success:true` and `msg_id`, and its call must match the complete title and body exactly. Claude's reply header is `【回复】Claude Code·NNNN → Codex·NNNNN`; Claude uses courier to deliver that reply back to Codex. See [SKILL.md](skills/courier/SKILL.md) for the full round trip.
 
 After `locate` finds a new session ID, run `wait-number <ID> --timeout 90` before using its five-digit number. It polls the session index and returns `编号未就绪` if the title is still unnumbered. The first `Codex·新建` delivery remains valid even when the new session has a bootstrap user message before that delivery, provided there was no earlier headed delivery or assistant reply.
 

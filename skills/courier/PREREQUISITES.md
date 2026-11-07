@@ -16,7 +16,7 @@ Check every item, in order. **Tested** means verified by hand on the environment
 
 Other versions may work but are untested. Codex 26.1029 replaced the AXRadioButton tab with Chat toolbar static text. Re-run the self-check (section 7) after an App update. A cold start has only fixture coverage: the running App was not restarted for this review.
 
-## 2. Required for every channel
+## 2. Required for Codex destination channels
 
 | # | Item | How to check or set up |
 | --- | --- | --- |
@@ -62,13 +62,17 @@ Without cua-driver, agents lacking Computer use can only use the CLI channel, wh
 
 State and logs go to `$COURIER_STATE_DIR` (default `~/.local/state/courier`).
 
-## 6. Not supported
+## 6. Claude Code session send
+
+For `--app claude send`, install the Claude Code CLI and sign in as the same account currently used in the Claude desktop App. The command checks `claude auth status --json` and compares only the account identifiers in desktop `config.json` and CLI `.claude.json`; it refuses missing or mismatched IDs and authentication override environment variables. Do not provide tokens or passwords to courier. The target must be an existing, idle Claude Code session with a unique four-digit title prefix. The CLI process needs network access for `SendMessage`.
+
+## 7. Not supported
 
 - Codex cloud tasks, or Codex on another machine. Session logs live only in the local `~/.codex`.
 - A Codex turn waiting on a human approval: `wait` times out, and the user must approve in the app.
-- Codex app closed and no Codex CLI installed: no channel works.
+- Codex app closed and no Codex CLI installed: no Codex destination channel works.
 
-## 7. Self-check after installing
+## 8. Self-check after installing
 
 1. `python3 -I scripts/courier.py find <any session title>` lists the session.
 2. Create a test session: compose a body with `compose --new` that asks for the expected `【回复】` header and a unique marker.

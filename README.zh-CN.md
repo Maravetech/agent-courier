@@ -4,7 +4,7 @@
 
 [English](README.md)
 
-**Courier（投递）**：让一个 AI Agent 往 macOS 上 **Codex 桌面 App** 的指定会话里投递消息，再读会话记录确认送达、读取回复，然后接着推进任务。整个过程**不抢你的键盘和鼠标焦点**。
+**Courier（投递）**：向 macOS 上指定的 **Codex 或 Claude Code 会话**投递消息，再读本地会话记录确认送达和回复。Codex 界面通道在后台操作，不抢键盘和鼠标焦点。
 
 > 这是非官方的社区项目，和 OpenAI、Anthropic 没有关联，也没有得到它们的认可或支持。「Codex」「ChatGPT」「Claude」是各自所有者的商标。
 
@@ -12,13 +12,14 @@
 
 - **前端发送**：Agent 通过 macOS 的辅助功能接口在后台操作：切到 Codex App 里的目标会话，写入输入框，再点发送。任意会话都能投，包括新建会话。
 - **后端核对**：直接只读 `~/.codex` 里的会话记录。核对送达、读回复都只要几行文字，不用截图。
-- **身份令牌**：发送时第一行写 `【投递】<发送方>·<编号> → Codex·<编号>`，回复时第一行写 `【回复】Codex·<编号> → <发送方>·<编号>`，谁发给谁一眼就能看清。
+- **身份令牌**：发送时第一行写 `【投递】<发送方>·<编号> → <收件方>·<编号>`，回复时第一行用 `【回复】` 反向写两个令牌，谁发给谁一眼就能看清。
 
 | 通道 | 工具 | 能投到哪里 | 截图 |
 | --- | --- | --- | --- |
 | 前端主通道 | Claude Computer use（后台 `app_*` 工具） | Codex App 里的任意会话，包括新建会话 | 写入或点击前截一张 0.1 倍的小图 |
 | 前端备用通道 | Swift 原生 macOS AX 控件操作，配合 [cua-driver](https://github.com/trycua/cua) 发现屏上窗口 ID，再按 ID 绑定 AX 窗口（`ui-*` 命令） | 同上 | 不截图 |
 | 命令行兜底 | `codex exec` | 新建会话，以及 App 从没加载过的会话 | 不截图 |
+| Claude 会话发送 | `claude -p` 调用一次 `SendMessage` | 已有、编号唯一的 Claude Code 会话 | 不截图 |
 
 ## 安全设计
 
@@ -68,6 +69,8 @@ python3 -I $C watch <ID>             # 持续输出开工、完成、中止、�
 ```
 
 `ui-send` 只用于索引中已有的会话；新建会话用 Computer use 或 `send --new`。`find`、`status`、`verify`、`wait`、`watch` 按会话 ID 汇总所有 rollout 分段，按事件时间读取，包含文件名带 `_分段ID` 后缀的记录。`wait` 以匹配到的投递消息为锚，即使回合已结束也能返回；中止或抬头不符会返回非零。离线测试不代表真实 Codex 界面已经送达。
+
+**Codex → Claude Code：**先用 `--app claude find <编号或完整标题>` 找唯一会话，并用 `status <ID> -n 0` 确认空闲；再用 `--app claude compose --from-agent Codex --from-session <五位编号> --to <Claude ID> --file body.txt --out msg.txt`，执行 `--app claude send <Claude ID> --file msg.txt`，最后依次 `--app claude verify <ID> --text <唯一标识>`、`--app claude wait <ID> --text <唯一标识>`。Claude CLI 必须已登录且与桌面 App 账号一致，否则拒发。工具调用必须仅一次、目标完整标题和正文逐字一致，结果须有 `success:true` 与 `msg_id`。Claude 回复的首行须是 `【回复】Claude Code·NNNN → Codex·NNNNN`，并用 courier 投回发起的 Codex 会话；完整往返见 [SKILL.md](skills/courier/SKILL.md)。
 
 新会话用 `locate` 取得 ID 后，先运行 `wait-number <ID> --timeout 90`，等标题出现唯一的五位编号；超时返回「编号未就绪」。首条 `Codex·新建` 投递前即使有引导用的用户消息，只要此前没有带抬头的投递或助手回复，`wait` 仍接受新建令牌。
 
