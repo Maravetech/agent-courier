@@ -23,7 +23,8 @@ let tracker = RolloutTracker()
 var state: String?
 for line in lines {
     try handle.write(contentsOf: Data((String(line)+"\\n").utf8))
-    state = tracker.read(live, senderApp: "Claude Code", sender: "0102", targetApp: "Codex", target: "00172")
+    state = tracker.read(live, senderApp: "Claude Code", sender: "0102", targetApp: "Codex", target: "00172",
+                         notBefore: CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) : nil)
 }
 try handle.close()
 print(state ?? "unchanged")
@@ -34,10 +35,11 @@ print(state ?? "unchanged")
     def tearDownClass(cls):
         cls.temp.cleanup()
 
-    def check_states(self, rows, expected):
+    def check_states(self, rows, expected, floor=None):
         path = self.folder/'fixture.jsonl'
         path.write_text('\n'.join(json.dumps(row) for row in rows)+'\n')
-        actual = subprocess.check_output([str(self.folder/'reduce'), str(path)], text=True).strip()
+        args = [str(self.folder/'reduce'), str(path)]
+        actual = subprocess.check_output(args + ([str(floor)] if floor is not None else []), text=True).strip()
         self.assertEqual(actual, expected)
 
     @staticmethod
@@ -72,3 +74,14 @@ print(state ?? "unchanged")
     def test_large_tool_output_does_not_lose_delivery(self):
         rows = self.anchor()+[dict(type='response_item', payload=dict(type='custom_tool_call_output', output='x'*2_000_000)), self.message('user','继续'), self.event('task_complete', last_agent_message='【回复】Codex·00172 → Claude Code·0102\n完成')]
         self.check_states(rows, 'replied')
+
+    def test_new_delivery_does_not_reuse_an_old_reply(self):
+        old = self.anchor()
+        old[-1]['timestamp'] = '2026-01-02T00:00:01.500Z'
+        old.append(self.event('task_complete', last_agent_message='【回复】Codex·00172 → Claude Code·0102'))
+        floor = 1767312010
+        self.check_states(old, 'unchanged', floor)
+        fresh = self.anchor()
+        fresh[-1]['timestamp'] = '2026-01-02T00:00:11.500Z'
+        self.check_states(old+fresh, 'working', floor)
+        self.check_states(old+fresh+[old[-1]], 'replied', floor)

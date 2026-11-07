@@ -154,7 +154,8 @@ def update_pair(sender, recipient, state, reason="", respect_preference=False):
         motion_at = (old.get("motion_at", old.get("updated_at", now)) if state in ("delivered", "working")
                      else now)
         pairs.append({**old, "from_app": from_app, "from": from_id, "to_app": to_app, "to": to_id,
-                      "state": state, "reason": reason[:60], "updated_at": now, "motion_at": motion_at})
+                      "state": state, "reason": reason[:60], "updated_at": now, "motion_at": motion_at,
+                      "sent_at": now if state == "sending" else old.get("sent_at")})
         atomic_write({"pairs": pairs})
     return pairs
 

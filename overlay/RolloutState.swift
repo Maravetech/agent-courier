@@ -3,9 +3,15 @@ import Darwin
 
 // Retain the latest matching delivery across user interjections and retry turns.
 final class RolloutTracker {
+    private static let timestamp = {
+        let format = ISO8601DateFormatter()
+        format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return format
+    }()
+    private var deliveryFloor: Double?
     private var offset: Int64 = 0, inode: UInt64 = 0
     private var anchored = false, reply = "", state = "working"
-    func read(_ path: String, senderApp: String, sender: String, targetApp: String, target: String) -> String? {
+    func read(_ path: String, senderApp: String, sender: String, targetApp: String, target: String, notBefore: Double? = nil) -> String? {
         guard let file = fopen(path, "r") else { return nil }
         let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: 65536)
         defer { buffer.deallocate(); fclose(file) }
@@ -15,6 +21,10 @@ final class RolloutTracker {
         guard fstat(fileno(file), &info) == 0 else { return nil }
         if inode != UInt64(info.st_ino) || info.st_size < offset {
             offset = 0; anchored = false; reply = ""; state = "working"
+        }
+        if deliveryFloor != notBefore {
+            deliveryFloor = notBefore
+            anchored = false; reply = ""; state = "working"
         }
         inode = UInt64(info.st_ino)
         fseeko(file, offset, SEEK_SET)
@@ -37,6 +47,11 @@ final class RolloutTracker {
                 if row["type"] as? String == "response_item", body["type"] as? String == "message" {
                     let text = (body["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined()
                     if body["role"] as? String == "user", text.components(separatedBy: "\n").first == delivery {
+                        if let notBefore {
+                            guard let timestamp = row["timestamp"] as? String,
+                                  let date = Self.timestamp.date(from: timestamp),
+                                  date.timeIntervalSince1970 >= notBefore else { return }
+                        }
                         anchored = true; reply = ""; state = "working"
                     }
                     if anchored, body["role"] as? String == "assistant" { reply = text }

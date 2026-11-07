@@ -9,12 +9,12 @@ private struct Pair: Codable {
     let from_app: String, to_app: String, from: String, to: String, state: String
     let reason: String?
     let updated_at: Double
-    let motion_at: Double?
+    let motion_at: Double?, sent_at: Double?
     let source: Point?, target: Point?
     var key: String { "\(from_app)·\(from)→\(to_app)·\(to)" }
     func changing(_ next: String, at time: Double) -> Pair {
         Pair(from_app: from_app, to_app: to_app, from: from, to: to, state: next,
-             reason: reason, updated_at: time, motion_at: time, source: source, target: target)
+             reason: reason, updated_at: time, motion_at: time, sent_at: sent_at, source: source, target: target)
     }
 }
 private struct Snapshot: Codable { let pairs: [Pair] }
@@ -207,14 +207,14 @@ private final class Overlay {
         guard let snapshot = try? JSONDecoder().decode(Snapshot.self, from: Data(contentsOf: stateURL)),
               let pair = snapshot.pairs.first(where: { $0.key == token }),
               let state = tracker.read(log.path, senderApp: pair.from_app, sender: pair.from,
-                                       targetApp: pair.to_app, target: pair.to) else { return }
+                                       targetApp: pair.to_app, target: pair.to, notBefore: pair.sent_at) else { return }
         rolloutActivity[token] = Date().timeIntervalSince1970
         if state == pair.state { return }
         let changedAt = Date().timeIntervalSince1970
         let returning = ["replied", "error", "wrong_header", "stuck", "archived_target"].contains(state)
         let updated = snapshot.pairs.map { item in item.key == token ? Pair(from_app: item.from_app, to_app: item.to_app,
             from: item.from, to: item.to, state: state, reason: item.reason, updated_at: changedAt,
-            motion_at: returning ? changedAt : item.motion_at ?? item.updated_at, source: item.source, target: item.target) : item }
+            motion_at: returning ? changedAt : item.motion_at ?? item.updated_at, sent_at: item.sent_at, source: item.source, target: item.target) : item }
         if let data = try? JSONEncoder().encode(Snapshot(pairs: updated)) { try? data.write(to: stateURL, options: .atomic) }
     }
     private func maintain() {

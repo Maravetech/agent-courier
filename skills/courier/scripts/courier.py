@@ -1381,6 +1381,8 @@ def cmd_ui_send(a):
                     and time.monotonic() < deadline):
                 break
         if not result["ok"]:
+            if not result.get("sent_possible"):
+                overlay_emit("error", body, result.get("reason", "拒发"))
             if result.get("foreground") and not result.get("mutated"):
                 print("Codex 在前台，用户可能正在使用；未切页；没有写入")
                 return 2
