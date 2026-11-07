@@ -1,17 +1,16 @@
 ---
 name: courier
 description: >-
-  Courier (投递): send a message into a chosen Codex desktop-app session, confirm delivery by reading the
-  session log, wait for the reply, and keep the task going with follow-ups. Front end: write the Codex input box
-  and press send through background accessibility tools, without stealing the user's focus (works for any
-  session, including new ones). Back end: read ~/.codex session logs directly, never screenshots.
-  Use when the user says "send this to Codex session 00xxx", "tell Codex to continue", "check what Codex did",
-  "投递给 Codex", or "发到 codex 的 session".
+  Courier (投递): send a headed message to a chosen Codex desktop-app or Claude Code session,
+  confirm delivery in its local session log, and wait for a headed reply. Codex UI sending uses
+  background accessibility without stealing focus; Codex-to-Claude sending uses one Claude CLI
+  SendMessage call with account and target checks. Use for "投递给 Codex", "发给 Claude Code 会话",
+  or checking a session's delivery and reply.
 ---
 
 # Courier
 
-**One line**: the front end sends (UI or CLI); the back end reads the session log to confirm; repeat until the task is done.
+**One line**: the front end sends (UI or CLI); the back end reads the target session log to confirm; repeat until the task is done.
 
 First time? Go through [`PREREQUISITES.md`](PREREQUISITES.md) and run its self-check before delivering anything real.
 
@@ -31,7 +30,8 @@ First time? Go through [`PREREQUISITES.md`](PREREQUISITES.md) and run its self-c
 | `watch <ID> [<ID> …] --since <time>` | One-shot wake when any listed session ends a turn | 0 ended / 3 timeout |
 | `watch <ID> --stream` | Continuously print start, complete, abort, and approval-wait changes | 0 on bounded timeout |
 | `ui-tab` / `ui-switch <exact title>` / `ui-send --file <body> --session-id <ID> --expect-tab <exact title>` | Fallback front end for an existing session; use `--window-id <ID>` on each command when multiple Codex windows are on screen | `ui-send`: 0 clicked / 2 refused / 1 no send button |
-| `--app claude <find\|status\|verify\|wait\|watch\|locate\|compose>` | Read-only Claude desktop session back end (`~/.claude/projects`) | as above |
+| `--app claude <find\|status\|verify\|wait\|watch\|locate\|compose>` | Claude desktop session records (`~/.claude/projects`) | as above |
+| `--app claude send <ID, four-digit number, or exact title> --file <body>` | Send one headed Codex message to a uniquely named Claude Code session through one `claude -p` / `SendMessage` call | 0 accepted / 2 refused / 5 CLI or receipt failure |
 | `send <ID> --file <body>` or `send --new --file <body>` | CLI fallback via `codex exec` | 0 submitted / 4 session held by the app |
 
 Session numbers can repeat. **Always act on the session ID.**
@@ -82,6 +82,16 @@ Why the CLI can't be primary: while the Codex app runs, it holds the write lock 
 ### Round-trip acceptance
 
 A delivery is complete only when the **originating session** receives the reply read back by `wait`: the sender sends a headed message, `verify` confirms a user message in the target session, and `wait` confirms a normal turn end with the exact reverse `【回复】` header. Return the `wait` result and reply to the originating session; a successful click or `verify` alone is not a completed round trip. If `wait` fails, report the failure in the originating session and do not claim a reply.
+
+### Codex → Claude Code round trip
+
+1. `--app claude find <four-digit number or exact title>` and `status <ID> -n 0`: require one numbered, idle Claude session. The send command repeats these checks.
+2. `--app claude compose --from-agent Codex --from-session <five-digit Codex number> --to <Claude ID> --file body.txt --out msg.txt`. Use a unique marker in the body.
+3. `--app claude send <Claude ID> --file msg.txt`. It checks the Claude CLI login and the current desktop/CLI account IDs without printing credentials. It sends with `claude -p`, only `SendMessage` available, and requires one tool call with the exact `to` and `message`, plus `success:true` and `msg_id`. A CLI error or uncertain receipt is nonzero; check `verify` before any retry.
+4. `--app claude verify <Claude ID> --text <unique marker> --since <SINCE>`, then `--app claude wait <Claude ID> --text <unique marker>`. Claude's SendMessage inbox appears as a peer user record; the helper unwraps it for these checks. A successful `wait` requires `【回复】Claude Code·NNNN → Codex·NNNNN` as the first line of Claude's final reply.
+5. For an explicit return delivery, Claude uses `compose` to wrap its reply in a new `【投递】Claude Code·NNNN → Codex·NNNNN` message and sends it with courier's Codex front end. The originating Codex session checks `verify` for that return message; if it answers, Claude can `wait` on that new delivery. A bare `【回复】` cannot be passed to `ui-send`, which requires a delivery header. The initial `--app claude wait` already lets the Codex sender read Claude's answer directly from Claude's record.
+
+The CLI process is a model intermediary: the helper checks its tool arguments after the call, so a malformed call may already have run. It never retries automatically. Use the destination log readback to confirm the actual delivery.
 
 ### Front end with Computer use
 
