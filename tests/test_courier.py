@@ -1040,7 +1040,8 @@ class ClaudeBackendTest(unittest.TestCase):
         cli = Path(self.tmp.name) / '.claude.json'
         cli.write_text(json.dumps({'oauthAccount': {'accountUuid': 'same', 'emailAddress': 'x@example.test'}}))
         status = SimpleNamespace(returncode=0, stdout=json.dumps({'loggedIn': True, 'email': 'x@example.test'}))
-        with patch.dict(os.environ, {'HOME': self.tmp.name}), patch.object(subprocess, 'run', return_value=status):
+        with patch.dict(os.environ, {'HOME': self.tmp.name}, clear=True), \
+             patch.object(subprocess, 'run', return_value=status):
             self.assertEqual(courier.claude_account_ready(), (True, ''))
             cli.write_text(json.dumps({'oauthAccount': {'accountUuid': 'other', 'emailAddress': 'x@example.test'}}))
             self.assertFalse(courier.claude_account_ready()[0])
