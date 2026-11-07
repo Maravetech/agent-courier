@@ -75,6 +75,10 @@ if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "fixture" {
         }
         answer = ["ok": matches.count == 1, "matches": matches.count,
                   "binding": byID ? "window_id" : "geometry"]
+        if matches.isEmpty {
+            answer["warmup_required"] = true
+            answer["warmup_stage"] = "window"
+        }
     } else if mode == "sidebar", let first = rows.first {
         let decision = sidebarDecision(fixtureModel(first).2, first["recent"] as? Int ?? 0,
                                        first["recentExpanded"] as? Bool)
@@ -166,6 +170,10 @@ if let getAXWindowID = getAXWindowID {
               AXValueGetValue(s as! AXValue, .cgSize, &size) else { return false }
         return sameFrame(CGRect(origin: point, size: size), cgBounds)
     }
+}
+if matches.isEmpty {
+    emit(["ok": false, "reason": "App AXWindows 与屏上窗口无法唯一匹配",
+          "warmup_required": true, "warmup_stage": "window"], 2)
 }
 guard matches.count == 1 else { refuse("App AXWindows 与屏上窗口无法唯一匹配") }
 let window = matches[0]

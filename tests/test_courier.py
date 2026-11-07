@@ -839,6 +839,38 @@ class CourierTest(unittest.TestCase):
         self.assertEqual([item[0] for item in calls], ['get_window_state'])
         self.assertEqual(calls[0][1]['query'], '聊天工具栏')
 
+    def test_native_ax_missing_window_warms_once_then_stops_if_still_missing(self):
+        calls = []
+        def fake_cua(tool, args):
+            calls.append((tool, args))
+            self.assertEqual(tool, 'get_window_state')
+            return json.dumps({'tree_markdown': ''})
+        missing = SimpleNamespace(returncode=2, stdout=json.dumps(
+            {'ok': False, 'reason': 'App AXWindows 与屏上窗口无法唯一匹配',
+             'warmup_required': True, 'warmup_stage': 'window'}))
+        with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'cua', side_effect=fake_cua), \
+             patch.object(subprocess, 'run', side_effect=[missing, missing]) as run:
+            result = courier.native_ui_action('tab')
+        self.assertFalse(result['ok'])
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]['query'], '聊天工具栏')
+
+    def test_native_ax_missing_window_warms_once_then_binds(self):
+        calls = []
+        missing = SimpleNamespace(returncode=2, stdout=json.dumps(
+            {'ok': False, 'reason': 'App AXWindows 与屏上窗口无法唯一匹配',
+             'warmup_required': True, 'warmup_stage': 'window'}))
+        ready = SimpleNamespace(returncode=0, stdout=json.dumps({'ok': True, 'tab': '00159 test target'}))
+        with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'cua', side_effect=lambda tool, args: calls.append((tool, args)) or '{}'), \
+             patch.object(subprocess, 'run', side_effect=[missing, ready]) as run:
+            self.assertEqual(courier.native_ui_action('tab')['tab'], '00159 test target')
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]['query'], '聊天工具栏')
+
     def test_native_tab_ignores_ambiguous_double_axwindow_tree(self):
         ambiguous = ('- [0] AXWindow "Main"\n  - [1] AXRadioButton "00159 test target"\n'
                      '- [100] AXWindow "Main"\n  - [101] AXRadioButton "00159 test target"')
@@ -1104,10 +1136,20 @@ class SwiftAXFixtureTest(unittest.TestCase):
                              (0, {'binding': 'geometry', 'matches': 1, 'ok': True}))
             row['axBounds'] = [other]
             self.assertEqual(self.fixture('window', [row]),
-                             (2, {'binding': 'geometry', 'matches': 0, 'ok': False}))
+                             (2, {'binding': 'geometry', 'matches': 0, 'ok': False,
+                                  'warmup_required': True, 'warmup_stage': 'window'}))
             row['axBounds'] = [cg, cg]
             self.assertEqual(self.fixture('window', [row]),
                              (2, {'binding': 'geometry', 'matches': 2, 'ok': False}))
+
+    def test_missing_axwindow_requests_warmup_before_binding_refusal(self):
+        row = {'windowID': 16105,
+               'cgBounds': {'x': 20, 'y': 30, 'width': 1000, 'height': 700},
+               'axBounds': [], 'axWindowIDs': []}
+        code, result = self.fixture('window', [row])
+        self.assertEqual(code, 2)
+        self.assertEqual(result.get('warmup_required'), True)
+        self.assertEqual(result.get('warmup_stage'), 'window')
 
     def test_window_id_binds_when_cg_and_ax_coordinates_disagree(self):
         for ax_x, cg_x, ax_y, cg_y in ((4527, 2230, 30, 30), (3794, 1880, 30, 45)):
@@ -1119,7 +1161,8 @@ class SwiftAXFixtureTest(unittest.TestCase):
                              (0, {'binding': 'window_id', 'matches': 1, 'ok': True}))
             row['axWindowIDs'] = [16106]
             self.assertEqual(self.fixture('window', [row]),
-                             (2, {'binding': 'window_id', 'matches': 0, 'ok': False}))
+                             (2, {'binding': 'window_id', 'matches': 0, 'ok': False,
+                                  'warmup_required': True, 'warmup_stage': 'window'}))
             row['axBounds'] = [ax, ax]
             row['axWindowIDs'] = [16105, 16105]
             self.assertEqual(self.fixture('window', [row]),
