@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -21,10 +22,14 @@ def make_fixture(root):
     pairs=[]
     for app,a,b in [('Claude Code','0102','00172'),('Claude Code','0102','00166'),('Claude Code','0102','00173'),('Codex','00159','00172'),('Claude Code','0064','00172')]:
         pairs.append(dict(from_app=app,**{'from':a},to_app='Codex',to=b,state='replied',updated_at=1794050000,reason='preserve'))
+    (state/'config.json').write_text('{"enabled":true}')
     (state/'pairs.json').write_text(json.dumps({'pairs':pairs,'version':1}))
     (state/'links.json').write_text(json.dumps({'disconnected':['Codex·00159→Codex·00172','Claude Code·0102→Codex·00166']}))
-    return dict(os.environ,CODEX_HOME=str(codex),COURIER_CLAUDE_SESSIONS=str(claude),COURIER_STATE_DIR=str(root))
+    env = dict(os.environ,CODEX_HOME=str(codex),COURIER_CLAUDE_SESSIONS=str(claude),COURIER_STATE_DIR=str(root))
+    env.pop("COURIER_OVERLAY", None)
+    return env
 
+@unittest.skipUnless(sys.platform == "darwin", "macOS Swift overlay")
 class PairDirectoryTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -2,11 +2,13 @@
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+@unittest.skipUnless(sys.platform == "darwin", "macOS Swift overlay")
 class OverlayRolloutTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

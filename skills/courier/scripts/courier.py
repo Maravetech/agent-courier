@@ -29,11 +29,13 @@ App 里开着的会话要走界面通道（后台电脑操作工具），见上�
 """
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 CODEX = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
 INDEX = os.path.join(CODEX, "session_index.jsonl")
@@ -545,8 +547,6 @@ def cmd_watch_stream(a):
     deadline = time.monotonic() + a.timeout if a.timeout is not None else None
     seen, current = 0, None
     initial = True
-    if APP == "codex" and scan(path)[1]:
-        overlay_latest_turn(path, "working")
     while True:
         path = rollout_path(d["id"])
         rows = list(events(path))
@@ -631,9 +631,19 @@ def parse_header(text):
     return match.group(1), match.group(2)
 
 
+OVERLAY_CONTROLLER = Path(__file__).with_name("overlay_controller.py")
+_overlay_spec = importlib.util.spec_from_file_location("courier_overlay", OVERLAY_CONTROLLER)
+_overlay = importlib.util.module_from_spec(_overlay_spec)
+_overlay_spec.loader.exec_module(_overlay)
+
+
+def overlay_enabled():
+    return _overlay.enabled(Path(LOGDIR) / "overlay")
+
+
 def overlay_emit(state, body, reason=""):
     """Best-effort visual side effect. A missing or failed overlay never changes delivery."""
-    if os.environ.get("COURIER_OVERLAY", "1") == "0":
+    if not overlay_enabled():
         return
     parsed = parse_header(body)
     if not parsed or not parsed[1].startswith("Codex·") or not parsed[0].startswith(("Claude Code·", "Codex·")):
@@ -648,8 +658,17 @@ def overlay_emit(state, body, reason=""):
         pass
 
 
+def overlay_messages(path, since=None):
+    try:
+        return scan(path, since)[0]
+    except (OSError, ValueError, RuntimeError):
+        return []
+
+
 def overlay_from_log(path, state, reason="", text=None):
-    candidates = [(role, body) for _, role, body in scan(path)[0] if role == "user" and parse_header(body)]
+    if not overlay_enabled():
+        return
+    candidates = [(role, body) for _, role, body in overlay_messages(path) if role == "user" and parse_header(body)]
     if text:
         candidates = [(role, body) for role, body in candidates if text in body]
     if candidates:
@@ -657,18 +676,18 @@ def overlay_from_log(path, state, reason="", text=None):
 
 
 def overlay_latest_turn(path, state, reason="", since=None):
-    if APP != "codex":
+    if APP != "codex" or not overlay_enabled():
         return
-    messages = scan(path, since)[0]
+    messages = overlay_messages(path, since)
     users = [body for _, role, body in messages if role == "user"]
     if users and parse_header(users[-1]):
         overlay_emit(state, users[-1], reason)
 
 
 def overlay_watch_completion(path, since=None):
-    if APP != "codex":
+    if APP != "codex" or not overlay_enabled():
         return
-    messages = scan(path, since)[0]
+    messages = overlay_messages(path, since)
     users = [(i, body) for i, (_, role, body) in enumerate(messages) if role == "user"]
     if not users or not parse_header(users[-1][1]):
         return
@@ -683,46 +702,41 @@ def overlay_watch_completion(path, since=None):
 
 
 def cmd_overlay_pair(a):
-    if os.environ.get("COURIER_OVERLAY", "1") == "0":
+    if not overlay_enabled():
         return 0
     sender = a.from_session if "·" in a.from_session else token("Claude Code", a.from_session)
     recipient = a.to if "·" in a.to else token("Codex", a.to)
-    controller = os.path.join(os.path.dirname(__file__), "overlay_controller.py")
-    result = subprocess.run([sys.executable, "-I", controller, "--from-session", sender,
-                             "--to-session", recipient, "--state", a.state, "--reason", a.reason or ""],
-                            text=True, capture_output=True)
-    if result.returncode:
+    try:
+        result = subprocess.run([sys.executable, "-I", str(OVERLAY_CONTROLLER), "--from-session", sender,
+                                 "--to-session", recipient, "--state", a.state, "--reason", a.reason or ""],
+                                text=True, capture_output=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    if result.returncode == 5:
         print(result.stderr.strip(), file=sys.stderr)
-    return result.returncode
+        return 5
+    return 0
 
 
 def cmd_overlay_list(a):
-    controller = os.path.join(os.path.dirname(__file__), "overlay_controller.py")
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("courier_overlay", controller)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if not module.app_path().is_file():
+    if not _overlay.app_path().is_file():
         print("浮层 App 尚未构建，请先运行 sh overlay/build.sh", file=sys.stderr)
         return 1
-    return subprocess.call([str(module.app_path()), str(module.STATE_FILE), "--list"] + (["--json"] if a.json else []))
+    return subprocess.call([str(_overlay.app_path()), str(Path(LOGDIR) / "overlay/pairs.json"), "--list"] +
+                           (["--json"] if a.json else []))
 
 
 def cmd_overlay_status(a):
-    controller = os.path.join(os.path.dirname(__file__), "overlay_controller.py")
-    return subprocess.call([sys.executable, "-I", controller, "--status"])
+    args = ["--status"] if a.overlay_cmd == "status" else ["--set-enabled", a.overlay_cmd]
+    return subprocess.call([sys.executable, "-I", str(OVERLAY_CONTROLLER), *args])
 
 
 def overlay_check(sender, recipient):
-    """A disconnected link is a delivery gate, even when visuals are disabled."""
-    if recipient.endswith("·新建"):
-        return 0
-    controller = os.path.join(os.path.dirname(__file__), "overlay_controller.py")
-    result = subprocess.run([sys.executable, "-I", controller, "--check", "--from-session", sender,
-                             "--to-session", recipient], text=True, capture_output=True)
-    if result.returncode:
-        print(result.stderr.strip() or "投递关联检查失败", file=sys.stderr)
-    return result.returncode
+    """Read the independent delivery gate without starting any visual process."""
+    if sender + "→" + recipient in _overlay.read_links(Path(LOGDIR) / "overlay/links.json"):
+        print("这对会话已在菜单栏断开，请先点关联", file=sys.stderr)
+        return 5
+    return 0
 
 
 def cmd_overlay_check(a):
@@ -1496,7 +1510,8 @@ def main():
         choices=["idle", "pending", "sending", "delivered", "working", "replied", "wrong_header", "error", "stuck", "archived_source", "archived_target"])
     pair.add_argument("--reason"); pair.set_defaults(fn=cmd_overlay_pair)
     listing = overlay_sub.add_parser("list"); listing.add_argument("--json", action="store_true"); listing.set_defaults(fn=cmd_overlay_list)
-    overlay_sub.add_parser("status").set_defaults(fn=cmd_overlay_status)
+    for command in ("on", "off", "status"):
+        overlay_sub.add_parser(command).set_defaults(fn=cmd_overlay_status)
     check = overlay_sub.add_parser("check"); check.add_argument("--from", dest="from_session", required=True)
     check.add_argument("--to", required=True); check.set_defaults(fn=cmd_overlay_check)
     n = sub.add_parser("send"); n.add_argument("key", nargs="?"); n.add_argument("--file", required=True)

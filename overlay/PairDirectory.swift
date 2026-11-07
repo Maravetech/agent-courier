@@ -2,6 +2,30 @@ import Foundation
 import Darwin
 import SQLite3
 
+enum OverlayPreference {
+    static func read(_ folder: URL) -> Data {
+        (try? Data(contentsOf: folder.appendingPathComponent("config.json"))) ?? Data()
+    }
+    static func configured(_ data: Data) -> Bool {
+        (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["enabled"] as? Bool == true
+    }
+    static func effective(_ data: Data) -> Bool {
+        switch ProcessInfo.processInfo.environment["COURIER_OVERLAY"] {
+        case "0": return false
+        case "1": return true
+        default: return configured(data)
+        }
+    }
+    static func write(_ value: Bool, to folder: URL) throws {
+        let lock = Darwin.open(folder.appendingPathComponent("state.lock").path, O_CREAT | O_RDWR, mode_t(0o600))
+        guard lock >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        defer { Darwin.close(lock) }
+        guard flock(lock, LOCK_EX) == 0 else { throw CocoaError(.fileWriteUnknown) }
+        let data = try JSONSerialization.data(withJSONObject: ["enabled": value, "revision": UUID().uuidString])
+        try data.write(to: folder.appendingPathComponent("config.json"), options: .atomic)
+    }
+}
+
 struct DirectoryPair: Codable {
     let from_app: String, to_app: String, from: String, to: String, state: String
     let updated_at: Double
@@ -80,8 +104,7 @@ struct PairDirectory: Codable {
                 return complete[app] == true ? "\(app)·\(number) 不在会话列表" : ""
             }
             let reasons = Dictionary(uniqueKeysWithValues: pairs.map { ($0.key, [reason($0.from_app, $0.from), reason($0.to_app, $0.to)].filter { !$0.isEmpty }.joined(separator: "；")) })
-            let config = (try? Data(contentsOf: url.deletingLastPathComponent().appendingPathComponent("config.json"))) ?? Data()
-            let enabled = ((try? JSONDecoder().decode([String: Bool].self, from: config))?["enabled"] ?? true)
+            let enabled = OverlayPreference.effective(OverlayPreference.read(url.deletingLastPathComponent()))
             let visible = Set((enabled ? pairs : []).filter { reasons[$0.key] == "" && $0.state != "archived_source" }.prefix(10).map(\.key))
             var result = PairDirectory()
             for pair in pairs {

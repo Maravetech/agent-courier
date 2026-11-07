@@ -31,7 +31,8 @@ First time? Go through [`PREREQUISITES.md`](PREREQUISITES.md) and run its self-c
 | `watch <ID> --stream` | Continuously print start, complete, abort, and approval-wait changes | 0 on bounded timeout |
 | `overlay pair --from 'Claude Code·0007' --to 'Codex·00159' --state sending` | Start the optional click-through bird overlay before a Computer use send | 0 (visual failure never blocks delivery) |
 | `overlay check --from 'Claude Code·0007' --to 'Codex·00159'` | Gate a Computer use send against a disconnected pair | 0 allowed / 5 disconnected |
-| `overlay status` | Read the overlay App's Accessibility authorization state | 0 if read |
+| `overlay on` / `overlay off` / `overlay status` | Save or read the optional visual setting (default off). Status shows the saved and effective values | 0 success |
+| `overlay list [--json]` | Read the same session pairs shown by the panel | 0 listed |
 | `ui-tab` / `ui-switch <exact title>` / `ui-send --file <body> --session-id <ID> --expect-tab <exact title>` | Fallback front end for an existing session; use `--window-id <ID>` on each command when multiple Codex windows are on screen | `ui-send`: 0 clicked / 2 refused / 1 no send button |
 | `--app claude <find\|status\|verify\|wait\|watch\|locate\|compose>` | Claude desktop session records (`~/.claude/projects`) | as above |
 | `--app claude send <ID, four-digit number, or exact title> --file <body>` | Send one headed Codex message to a uniquely named Claude Code session through one `claude -p` / `SendMessage` call | 0 accepted / 2 refused / 5 CLI or receipt failure |
@@ -102,7 +103,7 @@ The CLI process is a model intermediary: the helper checks its tool arguments af
 2. `app_ax_find` searches **the last screenshot**. Before every click or write, take `app_screenshot` at scale 0.1 (tiny, still returns element indices). After a click, wait about 1.5 s for the UI to switch, then screenshot again.
 3. Switch session: `app_ax_find title_contains=<title>` → `app_click` with `element_index`. Never reuse old coordinates: the sidebar shifts when sessions are added. Confirm the target from the tab title. `app_list_windows` titles can lag, and so can screenshots, so read the tab via `app_zoom` or cua-driver.
 4. Write: `app_ax_find role=AXTextArea` gives the index and the placeholder (its title, which depends on language and page). `app_type` with `overwrite_existing: true`. **The replaced text returned must equal the placeholder**, a trailing newline allowed. Anything else is the user's draft: write it back exactly and stop to ask.
-5. Send: `app_key combo=return` on the input's `element_index`. "Unverified" is normal. Step 6 is the proof.
+5. Send: run `overlay check --from '<sender token>' --to '<Codex recipient token>'` before writing or pressing Send. Exit 5 means the pair is disconnected. For supported numbered Claude Code/Codex senders, run `overlay pair --from '<sender token>' --to '<Codex recipient token>' --state sending` immediately before `app_key combo=return` on the input's `element_index`. The visual hook is optional. Verify delivery from the log.
 6. New session: click the new-chat button (found via `app_ax_find`), write, press return, then `locate --text <snippet> --since SINCE` to get the ID. Next run `wait-number <ID> --timeout 90` and do not address the session by number until it returns 0. If it times out, report `编号未就绪`.
 7. If Codex is frontmost, wait up to 30 seconds for it to leave the foreground. If it stays frontmost, stop without switching or writing. If it comes forward during a switch, stop and restore the original view only when safe to identify; report when restoration cannot be confirmed.
 
@@ -121,6 +122,12 @@ The native bridge is `scripts/codex_ax.swift`, using only macOS AppKit and Appli
 - Never deliver into a session that is running a turn (`status` not idle). Wait for it to return to idle.
 - One writer per app at a time: finish switch, write and send before anyone else touches the same window. `ui-send` checks the tab and the draft every time.
 - Anything about money, credentials, changing rules or guardrails, live services, or irreversible actions: stop both sides and ask the user.
+
+## Optional delivery bird (macOS)
+
+The bird defaults off. After `sh overlay/build.sh`, run `python3 -I "$C" overlay on` to enable it, `overlay off` to close it, or `overlay status` to read the setting. The panel's display checkbox uses the same `overlay/config.json` under the courier state directory. `COURIER_OVERLAY=0` or `1` overrides the setting for a command without saving it. Disconnect still blocks delivery with exit 5 when the bird is off.
+
+The rings mark the paired sidebar rows, the dashed line connects them, and the bird flies on delivery and reply. Solid means active, hollow means idle, and gray means disconnected. Click the menu bird to list pairs by App, connect or disconnect an existing pair, or clean invalid pairs. The icon needs existing Input Monitoring access. The bird needs Accessibility to locate rows. Ask fenn to verify physical click-through, focus continuity, and following real window movement before treating those as accepted.
 
 ## Follow-up loop
 

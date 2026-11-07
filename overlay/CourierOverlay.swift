@@ -34,7 +34,7 @@ private final class Overlay {
     private let renderer = CAOverlayRenderer(scale: { point in displayScale(Point(x: point.x, y: point.y)) })
     private var iconVisible = false
     private var lastData = Data()
-    private var lastConfig = Data(), lastLinks = Data()
+    private var initialConfig = Data(), lastConfig = Data(), lastLinks = Data()
     private var lastLocate = 0.0
     private var invalidKeys = Set<String>()
     private var exitGeneration = 0
@@ -50,6 +50,8 @@ private final class Overlay {
     private var stateLog: URL { folder.appendingPathComponent("skylight.log") }
     init(_ url: URL) { stateURL = url; folder = url.deletingLastPathComponent(); locator = SidebarLocator(stateDirectory: folder) }
     func start() {
+        initialConfig = OverlayPreference.read(folder)
+        guard OverlayPreference.effective(initialConfig) else { return }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         instanceLock = Darwin.open(folder.appendingPathComponent("instance.lock").path, O_CREAT | O_RDWR, mode_t(0o600))
         guard instanceLock >= 0, flock(instanceLock, LOCK_EX | LOCK_NB) == 0 else {
@@ -74,11 +76,13 @@ private final class Overlay {
         let fd = Darwin.open(stateLog.path, O_WRONLY | O_APPEND | O_CREAT, mode_t(0o600))
         if fd >= 0 { data.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress, $0.count) }; Darwin.close(fd) }
     }
-    private var enabled: Bool {
-        if ProcessInfo.processInfo.environment["COURIER_OVERLAY"] == "0" { return false }
-        guard let data = try? Data(contentsOf: folder.appendingPathComponent("config.json")),
-              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Bool] else { return true }
-        return body["enabled"] ?? true
+    private func stillEnabled(_ config: Data) -> Bool {
+        OverlayPreference.effective(config) && (config == initialConfig || OverlayPreference.configured(config))
+    }
+    private func stop() -> Never {
+        if panelProcess?.isRunning == true { panelProcess?.terminate() }
+        renderer.clear()
+        exit(0)
     }
     private var disconnected: Set<String> {
         guard let data = try? Data(contentsOf: folder.appendingPathComponent("links.json")),
@@ -122,10 +126,11 @@ private final class Overlay {
         let quit = folder.appendingPathComponent("quit")
         if FileManager.default.fileExists(atPath: quit.path) {
             try? FileManager.default.removeItem(at: quit)
-            exit(0)
+            stop()
         }
+        let config = OverlayPreference.read(folder)
+        guard stillEnabled(config) else { stop() }
         let data = (try? Data(contentsOf: stateURL)) ?? Data()
-        let config = (try? Data(contentsOf: folder.appendingPathComponent("config.json"))) ?? Data()
         let links = (try? Data(contentsOf: folder.appendingPathComponent("links.json"))) ?? Data()
         let now = Date().timeIntervalSince1970
         guard force || data != lastData || config != lastConfig || links != lastLinks || now-lastLocate >= 1 else { return }
@@ -143,8 +148,8 @@ private final class Overlay {
         }
         if !visualProbe { watchRollouts(all) }
         let disconnectedKeys = disconnected
-        let selected = enabled ? Array(all.filter { !invalidKeys.contains($0.key) && $0.state != "archived_source" }
-            .sorted { $0.updated_at > $1.updated_at }.prefix(10)) : []
+        let selected = Array(all.filter { !invalidKeys.contains($0.key) && $0.state != "archived_source" }
+            .sorted { $0.updated_at > $1.updated_at }.prefix(10))
         let slots = PairPalette.slots(for: selected.map(\.key))
         var entries: [CAEntry] = [], sourceOffsets: [String: Int] = [:]
         for pair in selected {
@@ -158,7 +163,7 @@ private final class Overlay {
                 state: pair.state, motionAt: pair.motion_at ?? pair.updated_at,
                 disconnected: disconnectedKeys.contains(pair.key)))
         }
-        if !renderer.update(entries, iconRect: iconVisible ? iconRect : nil, enabled: enabled) {
+        if !renderer.update(entries, iconRect: iconVisible ? iconRect : nil, enabled: true) {
             iconVisible = false; log("ca_renderer_unavailable")
         }
         if all.isEmpty { maintenanceTimer?.invalidate(); maintenanceTimer = nil }
@@ -196,6 +201,7 @@ private final class Overlay {
         guard lock >= 0 else { return }
         defer { flock(lock, LOCK_UN); Darwin.close(lock) }
         flock(lock, LOCK_EX)
+        guard stillEnabled(OverlayPreference.read(folder)) else { return }
         let tracker = rolloutTrackers[token] ?? RolloutTracker()
         rolloutTrackers[token] = tracker
         guard let snapshot = try? JSONDecoder().decode(Snapshot.self, from: Data(contentsOf: stateURL)),
@@ -218,7 +224,8 @@ private final class Overlay {
         guard lock >= 0 else { return }
         defer { flock(lock, LOCK_UN); Darwin.close(lock) }
         flock(lock, LOCK_EX)
-        guard let data = try? Data(contentsOf: stateURL),
+        guard stillEnabled(OverlayPreference.read(folder)),
+              let data = try? Data(contentsOf: stateURL),
               let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
         let now = Date().timeIntervalSince1970
         let updated = snapshot.pairs.map { pair in
@@ -229,6 +236,7 @@ private final class Overlay {
            let output = try? JSONEncoder().encode(Snapshot(pairs: updated)) { try? output.write(to: stateURL, options: .atomic) }
     }
     private func maintenanceTick() {
+        guard stillEnabled(OverlayPreference.read(folder)) else { stop() }
         autoreleasepool {
             if let data = try? Data(contentsOf: stateURL),
                let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) {

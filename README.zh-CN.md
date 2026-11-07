@@ -30,6 +30,10 @@
 
 ## 可选投递小鸟浮层（macOS）
 
+浮层**默认关闭**。构建后运行 `python3 -I skills/courier/scripts/courier.py overlay on` 启用，`overlay off` 立即收起浮层，`overlay status` 查看保存值与生效值。面板复选框写入同一份本地设置。`COURIER_OVERLAY=0` 或 `1` 可临时覆盖。关闭时投递不会启动浮层、为视觉读取 rollout 或写入配对记录，已断开仍拦投。
+
+圆圈标记配对的两条侧栏会话，虚线连接两端。实心鸟表示正在投递或处理，空心鸟表示空闲，灰鸟表示已断开。点击菜单栏小鸟可查看配对、关联或断开，并清理失效记录。物理点击穿透、焦点连续性和真实拖窗跟随由 fenn 本人验收。
+
 运行 `sh overlay/build.sh` 构建 SkyLight/Core Animation 浮层。绘制进程不链接 AppKit；18 × 14 pt 的透明小鸟完全由 Swift 方格路径生成，展翅、收翅和左右镜像交给 Core Animation，不加载鸟的图片文件。稳定安装需签名身份，并将 `tech.marave.courier-overlay` 固定安装到 `~/Applications/courier-overlay.app` 后由 fenn 开启辅助功能；本机尚无签名身份，安装未验收。未授权时小鸟隐藏且不弹窗。进程只在有配对时运行，空配对约 3 秒退出；同一进程自绘小鸟图标，点击时按需启动独立 AppKit 配对面板。当前图标点击依赖系统已有的输入监控授权，未获授权时不会请求新权限，图标不可点击。面板提供显示开关、逐对关联/断开和退出；登录时启动使用 `SMAppService.mainApp`，默认关闭；无签名身份时无法实机验证注册。断开状态写入 `$COURIER_STATE_DIR/overlay/links.json`，投递退出码 5。
 
 每对使用一个覆盖连线与两端圆圈的透明 CA 窗口，通过空事件区域设置点击穿透；没有移动鼠标的调用。物理点击与 key window 仍需桌面实测。浮层进程通过 AX 定位侧栏会话行。查找规则：Codex 在 `AXList` 下找五位编号开头的 `AXButton`；Claude 在 `AXWebArea` 下找四位编号开头且位于左侧 320 pt 内的 `AXButton`。重复 frame 去重，只取屏幕与滚动区可见行，再用行内标题 `AXStaticText` 的 frame 把鸟停在编号首字左侧；如果圆圈会越过窗口左边缘，就把圆心移到窗口内。每对画虚线、两个圈；同时显示的最多 10 对获得 10 种不同的线色，实心鸟身体和空心鸟描边与其圈线同色，断开时鸟变灰。飞行 2.5 秒，翅膀在展开和收起两态切换，飞行与落点使用 CAEmitterLayer 粒子，减弱动态效果时不发粒子。最多显示最近活跃的 10 对，其他配对保留在面板。AXObserver 驱动重定位，结果记入 `$COURIER_STATE_DIR/overlay/locate.log`；任一端看不到就隐藏。菜单开关写入 `$COURIER_STATE_DIR/overlay/config.json`。

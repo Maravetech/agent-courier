@@ -17,7 +17,7 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
         return value
     }
-    private var enabled: Bool { object("config.json")["enabled"] as? Bool ?? true }
+    private var enabled: Bool { OverlayPreference.configured(OverlayPreference.read(folder)) }
     func applicationDidFinishLaunching(_ note: Notification) {
         guard CommandLine.arguments.count == 2 else { NSApp.terminate(nil); return }
         stateURL = URL(fileURLWithPath: CommandLine.arguments[1])
@@ -125,8 +125,10 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         stack.addArrangedSubview(footer)
     }
     @objc private func toggleDisplay() {
-        if let data = try? JSONSerialization.data(withJSONObject: ["enabled": !enabled]) { try? data.write(to: folder.appendingPathComponent("config.json"), options: .atomic) }
-        reload()
+        let value = !enabled
+        do { try OverlayPreference.write(value, to: folder) }
+        catch { lastData = Data(); reload(); return }
+        if value { reload() } else { NSApp.terminate(nil) }
     }
     @objc private func toggleLink(_ sender: NSButton) {
         guard let key = sender.identifier?.rawValue else { return }

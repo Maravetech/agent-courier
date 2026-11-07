@@ -10,7 +10,6 @@ import importlib.util
 import glob
 import io
 from contextlib import redirect_stdout
-import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -942,7 +941,8 @@ class CourierTest(unittest.TestCase):
 
     def test_overlay_pair_state_and_archive(self):
         state = Path(self.tmp.name, "overlay")
-        with patch.object(overlay, "STATE_DIR", state), patch.object(overlay, "STATE_FILE", state / "pairs.json"):
+        with patch.object(overlay, "STATE_DIR", state), patch.object(overlay, "STATE_FILE", state / "pairs.json"), \
+             patch.object(overlay, "LINKS_FILE", state / "links.json"):
             overlay.update_pair("Claude Code·0102", "Codex·00172", "sending")
             overlay.update_pair("Claude Code·0102", "Codex·00172", "working")
             overlay.update_pair("Codex·00172", "Codex·00165", "sending")
@@ -978,7 +978,9 @@ class CourierTest(unittest.TestCase):
         body = Path(self.tmp.name, "body.txt")
         body.write_text("【投递】Claude Code·0007 → Codex·00159\nfixture", encoding="utf-8")
         args = SimpleNamespace(file=str(body), new=False, key=TID, sandbox="workspace-write", cwd=None)
-        with patch.object(courier, "overlay_check", return_value=5), patch.object(courier.subprocess, "Popen") as start:
+        with patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")), \
+             patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "overlay_check", return_value=5), \
+             patch.object(courier.subprocess, "Popen") as start:
             self.assertEqual(courier.cmd_send(args), 5)
         start.assert_not_called()
 
@@ -994,7 +996,7 @@ class CourierTest(unittest.TestCase):
     def test_overlay_existing_app_is_not_started_twice(self):
         app = Path(self.tmp.name, "courier-overlay")
         app.write_text("")
-        with patch.object(overlay, "app_path", return_value=app), \
+        with patch.dict(os.environ, {"COURIER_OVERLAY": "1"}), patch.object(overlay, "app_path", return_value=app), \
              patch.object(overlay, "STATE_DIR", Path(self.tmp.name, "overlay")), \
              patch.object(overlay.subprocess, "run", return_value=SimpleNamespace(stdout=f"{app} /tmp/pairs.json\n")) as run, \
              patch.object(overlay.subprocess, "Popen") as start:
@@ -1013,7 +1015,8 @@ class CourierTest(unittest.TestCase):
         path = glob.glob(os.path.join(self.tmp.name, "sessions", "*", "*", "*", "rollout-*.jsonl"))[0]
         seen = []
         with patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")), \
-             patch.object(courier, "APP", "codex"), patch.object(courier, "overlay_emit", side_effect=lambda *args: seen.append(args)):
+             patch.object(courier, "APP", "codex"), patch.object(courier, "overlay_enabled", return_value=True), \
+             patch.object(courier, "overlay_emit", side_effect=lambda *args: seen.append(args)):
             args = SimpleNamespace(keys=[TID], since="2026-01-02T00:00:00Z", timeout=1, interval=0.01)
             self.assertEqual(courier.cmd_watch_once(args), 0)
         self.assertTrue(any(item[0] == "replied" for item in seen), seen)
@@ -1022,7 +1025,8 @@ class CourierTest(unittest.TestCase):
             f.seek(0); f.write(content); f.truncate()
         seen.clear()
         with patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")), \
-             patch.object(courier, "APP", "codex"), patch.object(courier, "overlay_emit", side_effect=lambda *args: seen.append(args)):
+             patch.object(courier, "APP", "codex"), patch.object(courier, "overlay_enabled", return_value=True), \
+             patch.object(courier, "overlay_emit", side_effect=lambda *args: seen.append(args)):
             self.assertEqual(courier.cmd_watch_once(args), 0)
         self.assertTrue(any(item[0] == "wrong_header" for item in seen), seen)
 

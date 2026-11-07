@@ -5,7 +5,7 @@
 - Group pair sessions by App with shared native title/existence checks, `overlay list --json`, and explicit invalid-pair cleanup; unknown metadata does not mark a pair invalid.
 
 - Optional macOS bird overlay anchors 2 pt before Claude or Codex sidebar conversation numbers through Accessibility. Each visible pair has two rings, one dashed line, and a transparent bird drawn from Swift vector rectangles. The bird flies for 2.5 seconds with two wing poses and Core Animation particles. Up to ten simultaneous pairs receive distinct line, ring, and bird colors; disconnected birds are gray. The resident SkyLight/Core Animation renderer does not link AppKit; it draws its own icon and opens a separate AppKit pair panel on demand. A disconnected pair blocks delivery with exit code 5. The renderer exits after the last pair disappears. Signed installation, physical icon click, and Launch at Login registration remain unverified.
-- `overlay pair` supports Computer use deliveries; `ui-send`, `verify`, `wait`, and `watch` update the visual state automatically. `COURIER_OVERLAY=0` disables it.
+- `overlay pair` supports Computer use deliveries; `ui-send`, `verify`, `wait`, and `watch` update the visual state automatically. The visual defaults off. `overlay on|off|status` shares one preference with the panel, and `COURIER_OVERLAY=0|1` overrides it for a command.
 - Per-app AX rules, visible-row filtering, duplicate-frame selection, and `locate.log` track anchors. Isolated tests record the overlay PID and foreground app; key-window and physical click-through acceptance remain pending.
 
 ## 0.3.0

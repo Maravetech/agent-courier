@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 STATE_DIR = Path(os.environ.get("COURIER_STATE_DIR", "~/.local/state/courier")).expanduser() / "overlay"
 STATE_FILE = STATE_DIR / "pairs.json"
@@ -28,7 +29,8 @@ def parse_token(value):
     return match[1], match[2]
 
 
-def atomic_write(data):
+def atomic_write(data, destination=None):
+    destination = destination or STATE_FILE
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".pairs-", dir=STATE_DIR)
     try:
@@ -36,10 +38,45 @@ def atomic_write(data):
             json.dump(data, out, ensure_ascii=False, separators=(",", ":"))
             out.flush()
             os.fsync(out.fileno())
-        os.replace(name, STATE_FILE)
+        os.replace(name, destination)
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def preference(folder=None):
+    try:
+        return json.loads(((folder or STATE_DIR) / "config.json").read_text()).get("enabled") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def enabled(folder=None):
+    override = os.environ.get("COURIER_OVERLAY")
+    return override == "1" if override in ("0", "1") else preference(folder)
+
+
+def set_enabled(value):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with (STATE_DIR / "state.lock").open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        atomic_write({"enabled": value, "revision": uuid.uuid4().hex}, STATE_DIR / "config.json")
+
+
+def wait_stopped():
+    try:
+        lock = (STATE_DIR / "instance.lock").open("r")
+    except FileNotFoundError:
+        return True
+    with lock:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                time.sleep(0.05)
+    return False
 
 
 def read_pairs():
@@ -58,10 +95,11 @@ def pair_key(sender, recipient):
     return sender + "→" + recipient
 
 
-def read_links():
+def read_links(path=None):
     try:
-        data = json.loads(LINKS_FILE.read_text())
-        return set(data.get("disconnected", [])) if isinstance(data, dict) else set()
+        data = json.loads((path or LINKS_FILE).read_text())
+        links = data.get("disconnected") if isinstance(data, dict) else None
+        return {key for key in links if isinstance(key, str)} if isinstance(links, list) else set()
     except (OSError, ValueError, AttributeError):
         return set()
 
@@ -97,7 +135,7 @@ def set_link(sender, recipient, connected):
     return connected
 
 
-def update_pair(sender, recipient, state, reason=""):
+def update_pair(sender, recipient, state, reason="", respect_preference=False):
     from_app, from_id = parse_token(sender)
     to_app, to_id = parse_token(recipient)
     if state not in VALID_STATES:
@@ -105,6 +143,8 @@ def update_pair(sender, recipient, state, reason=""):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with (STATE_DIR / "state.lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if respect_preference and not enabled():
+            return []
         if state == "sending" and is_disconnected(sender, recipient):
             raise PermissionError("这对会话已在菜单栏断开，请先点关联")
         current = read_pairs()
@@ -124,12 +164,16 @@ def app_path():
 
 
 def ensure_app():
+    if not enabled():
+        return
     app = app_path()
     if not app.is_file():
         return
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with (STATE_DIR / "app.lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if not enabled():
+            return
         rows = subprocess.run(["/bin/ps", "-awwxo", "command="], capture_output=True, text=True, timeout=5).stdout.splitlines()
         if any(row == str(app) or row.startswith(str(app) + " ") for row in rows):
             return
@@ -141,18 +185,23 @@ def ensure_app():
 
 
 def status():
-    app = app_path()
-    if not app.is_file():
-        print("浮层 App 尚未构建")
-        return 1
-    result = subprocess.run([str(app), "--status"], capture_output=True, text=True, timeout=5)
-    print(result.stdout.strip() or "辅助功能状态无法读取")
-    return result.returncode
+    override = os.environ.get("COURIER_OVERLAY")
+    print(f"configured={'on' if preference() else 'off'} effective={'on' if enabled() else 'off'}"
+          f" override={override if override in ('0', '1') else 'none'}")
+    return 0
+
+
+def start_best_effort():
+    try:
+        ensure_app()
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--set-enabled", choices=("on", "off"))
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--link", choices=["connect", "disconnect"])
     parser.add_argument("--from-session")
@@ -160,6 +209,15 @@ def main():
     parser.add_argument("--state", choices=sorted(VALID_STATES))
     parser.add_argument("--reason", default="")
     args = parser.parse_args()
+    if args.set_enabled:
+        value = args.set_enabled == "on"
+        set_enabled(value)
+        if value and enabled() and read_pairs():
+            start_best_effort()
+        elif not value and not wait_stopped():
+            print("已保存关闭状态，但浮层尚未退出", file=sys.stderr)
+            return 1
+        return status()
     if args.status:
         return status()
     if args.check or args.link:
@@ -176,17 +234,17 @@ def main():
         return 0
     if not (args.from_session and args.to_session and args.state):
         parser.error("pair needs --from-session, --to-session and --state")
-    if os.environ.get("COURIER_OVERLAY", "1") == "0":
+    if not enabled():
         return 0
     try:
-        pairs = update_pair(args.from_session, args.to_session, args.state, args.reason)
+        pairs = update_pair(args.from_session, args.to_session, args.state, args.reason, respect_preference=True)
     except PermissionError as error:
         print(str(error), file=sys.stderr)
         return 5
     except ValueError as error:
         parser.error(str(error))
-    if pairs and app_path().is_file():
-        ensure_app()
+    if pairs:
+        start_best_effort()
     return 0
 
 
