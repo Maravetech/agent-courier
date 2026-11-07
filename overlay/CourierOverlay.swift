@@ -3,6 +3,7 @@ import ApplicationServices
 import CoreGraphics
 import Darwin
 import SQLite3
+import ServiceManagement
 
 private struct Point: Codable { let x: Double; let y: Double }
 private struct Pair: Codable {
@@ -104,9 +105,15 @@ private final class Overlay {
     private func openPanel(at point: CGPoint) {
         guard renderer.iconFrame?.contains(point) == true else { return }
         if panelProcess?.isRunning == true { return }
-        let binary = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/courier-panel")
-        guard FileManager.default.isExecutableFile(atPath: binary.path) else { log("menu_panel_missing"); return }
-        let process = Process(); process.executableURL = binary; process.arguments = [stateURL.path]
+        let panel = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/CourierPanel.app")
+        guard Bundle(url: panel)?.executableURL != nil else { log("menu_panel_missing"); return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        var arguments = ["-W", "-n", "-a", panel.path]
+        for key in ["CODEX_HOME", "COURIER_CLAUDE_SESSIONS", "COURIER_OVERLAY"] {
+            if let value = ProcessInfo.processInfo.environment[key] { arguments += ["--env", "\(key)=\(value)"] }
+        }
+        process.arguments = arguments + ["--args", stateURL.path, String(getpid())]
         do { try process.run(); panelProcess = process } catch { log("menu_panel_failed: \(error.localizedDescription)") }
     }
     private func reload(force: Bool = false) {
@@ -132,7 +139,7 @@ private final class Overlay {
                 exit(0)
             }
         }
-        if !visualProbe { watchRollouts(all) }
+        if !visualProbe { autoreleasepool { watchRollouts(all) } }
         let disconnectedKeys = disconnected
         let selected = Array(all.filter { !invalidKeys.contains($0.key) && $0.state != "archived_source" }
             .sorted { $0.updated_at > $1.updated_at }.prefix(10))
@@ -164,16 +171,13 @@ private final class Overlay {
     private func watchRollouts(_ all: [Pair]) {
         let active = Set(all.filter { $0.to_app == "Codex" }.map(\.key))
         for (key, source) in rolloutSources where !active.contains(key) { source.cancel(); rolloutSources.removeValue(forKey: key) }
-        if active.isEmpty { return }
-        guard let index = try? String(contentsOf: codexHome.appendingPathComponent("session_index.jsonl"), encoding: .utf8) else { return }
-        let entries = index.split(separator: "\n").compactMap { line -> [String: String]? in
-            guard let value = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return nil }
-            return ["id": value["id"] as? String ?? "", "title": value["thread_name"] as? String ?? ""]
-        }
-        for pair in all where pair.to_app == "Codex" && rolloutSources[pair.key] == nil {
-            guard let id = entries.last(where: { $0["title"]?.hasPrefix(pair.to + " ") == true })?["id"] else { continue }
-            guard let files = FileManager.default.enumerator(at: codexHome.appendingPathComponent("sessions"), includingPropertiesForKeys: nil),
-                  let log = files.compactMap({ $0 as? URL }).first(where: { $0.lastPathComponent.hasSuffix("\(id).jsonl") }) else { continue }
+        let waiting = all.filter { active.contains($0.key) && rolloutSources[$0.key] == nil }
+        guard !waiting.isEmpty else { return }
+        let index = CodexIndex.read(codexHome, numbers: Set(waiting.map(\.to))).entries
+        for pair in waiting {
+            guard let id = index[pair.to]?.id, !id.isEmpty,
+                  let files = FileManager.default.enumerator(at: codexHome.appendingPathComponent("sessions"), includingPropertiesForKeys: nil),
+                  let log = files.lazy.compactMap({ $0 as? URL }).first(where: { $0.lastPathComponent.hasSuffix("\(id).jsonl") }) else { continue }
             let fd = Darwin.open(log.path, O_EVTONLY)
             guard fd >= 0 else { continue }
             let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
@@ -249,6 +253,20 @@ private final class Overlay {
             let point = SidebarLocator(stateDirectory: base.appendingPathComponent("overlay"))
                 .locate(app: CommandLine.arguments[2], number: CommandLine.arguments[3])
             print(point.map { "x=\($0.x) y=\($0.y)" } ?? "not_visible")
+            return
+        }
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--login-item" {
+            guard #available(macOS 13.0, *) else { exit(2) }
+            let service = SMAppService.mainApp
+            do {
+                switch CommandLine.arguments[2] {
+                case "on": try service.register()
+                case "off": try service.unregister()
+                case "status": break
+                default: exit(2)
+                }
+                print(service.status == .enabled ? "on" : "off")
+            } catch { exit(1) }
             return
         }
         if CommandLine.arguments.contains("--list") {

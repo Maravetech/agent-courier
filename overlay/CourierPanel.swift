@@ -1,6 +1,5 @@
 import AppKit
 import Darwin
-import ServiceManagement
 
 private final class ListStack: NSStackView { override var isFlipped: Bool { true } }
 private final class PanelWindow: NSPanel { override var canBecomeKey: Bool { true } }
@@ -9,6 +8,8 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var root: NSVisualEffectView!
     private var stateURL: URL!
     private var timer: Timer?
+    private var owner: DispatchSourceProcess?
+    private var loginEnabled = false
     private var report = PairDirectory()
     private var lastData = Data()
     private var folder: URL { stateURL.deletingLastPathComponent() }
@@ -19,8 +20,18 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     private var enabled: Bool { OverlayPreference.configured(OverlayPreference.read(folder)) }
     func applicationDidFinishLaunching(_ note: Notification) {
-        guard CommandLine.arguments.count == 2 else { NSApp.terminate(nil); return }
-        stateURL = URL(fileURLWithPath: CommandLine.arguments[1])
+        let arguments = CommandLine.arguments
+        guard arguments.count == 2 || arguments.count == 3 else { NSApp.terminate(nil); return }
+        if arguments.count == 3 {
+            guard let pid = pid_t(arguments[2]), pid > 1, kill(pid, 0) == 0 else { NSApp.terminate(nil); return }
+            let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+            source.setEventHandler { NSApp.terminate(nil) }
+            source.resume()
+            owner = source
+            guard kill(pid, 0) == 0 else { NSApp.terminate(nil); return }
+        }
+        stateURL = URL(fileURLWithPath: arguments[1])
+        loginEnabled = loginItem("status") ?? false
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1000, height: 800)
         let initial = PairDirectory.load(stateURL)
         let count = initial.rows.filter { !$0.invalid }.count + initial.invalid
@@ -36,8 +47,6 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         root.autoresizingMask = [.width, .height]; window.contentView = root
         reload()
         window.makeKeyAndOrderFront(nil)
-        if #available(macOS 14.0, *) { NSApp.activate() }
-        else { NSApp.activate(ignoringOtherApps: true) }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.reload() }
     }
     func applicationDidBecomeActive(_ note: Notification) { window?.makeKeyAndOrderFront(nil) }
@@ -121,7 +130,7 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         cleanup.isEnabled = report.invalid > 0; footer.addArrangedSubview(cleanup)
         if #available(macOS 13.0, *) {
             let login = NSButton(checkboxWithTitle: "登录时启动", target: self, action: #selector(toggleLogin(_:)))
-            login.state = SMAppService.mainApp.status == .enabled ? .on : .off; footer.addArrangedSubview(login)
+            login.state = loginEnabled ? .on : .off; footer.addArrangedSubview(login)
         }
         footer.addArrangedSubview(button("关闭", action: #selector(closePanel)))
         footer.addArrangedSubview(button("退出", action: #selector(quitOverlay)))
@@ -152,11 +161,23 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     @objc private func cleanAll() { PairDirectory.clean(stateURL, keys: report.invalidKeys); reload() }
     @objc private func closePanel() { NSApp.terminate(nil) }
+    private func loginItem(_ command: String) -> Bool? {
+        let binary = Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("MacOS/courier-overlay")
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = binary
+        process.arguments = ["--login-item", command]
+        process.standardOutput = output
+        guard (try? process.run()) != nil else { return nil }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "on"
+    }
     @objc private func toggleLogin(_ sender: NSButton) {
-        if #available(macOS 13.0, *) {
-            do { if sender.state == .on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() } }
-            catch { sender.state = sender.state == .on ? .off : .on }
-        }
+        loginEnabled = loginItem(sender.state == .on ? "on" : "off") ?? loginEnabled
+        sender.state = loginEnabled ? .on : .off
     }
     @objc private func quitOverlay() {
         try? Data().write(to: folder.appendingPathComponent("quit"), options: .atomic)
@@ -165,7 +186,7 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
 }
 @main struct CourierPanelMain {
     static func main() {
-        let app = NSApplication.shared; app.setActivationPolicy(.accessory)
+        let app = NSApplication.shared; app.setActivationPolicy(.regular)
         let panel = Panel(); app.delegate = panel; app.run()
     }
 }
