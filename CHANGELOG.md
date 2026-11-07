@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Read the frontmost desktop App through `NSWorkspace`; duplicate active browser processes no longer block Codex UI delivery. Codex still blocks when it is frontmost.
+- Address Claude Desktop sends by an account-scoped local session ID, refuse ambiguous name-based destinations, and require exact destination log readback. This narrows `--app claude send` to full CLI session IDs.
 - Explain that a loaded new-chat home has no open conversation, while retaining the cold-start timeout refusal.
 - Show the specific safe failure reason for `ui-*` errors, including UI lock timeout; hide raw CuaDriver output.
 - Ignore structured Codex question answers and context injections when checking whether a delivery reply was interrupted by another user message.

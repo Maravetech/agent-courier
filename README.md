@@ -19,7 +19,7 @@
 | Front end, primary | Claude Computer use (background `app_*` tools) | Any session in the Codex app, including new ones | One tiny 0.1-scale capture before a write or click |
 | Front end, fallback | native macOS AX via Swift, with [cua-driver](https://github.com/trycua/cua) for window ID discovery (`ui-*` commands); the bridge binds the AX window by ID | Same | None |
 | CLI, last resort | `codex exec` | New sessions, and sessions the app never loaded | None |
-| Claude session send | `claude -p` with one `SendMessage` call | An existing, uniquely numbered Claude Code session | None |
+| Claude session send | `claude -p` with one `SendMessage` call | An existing local Claude Desktop session addressed by full CLI session ID | None |
 
 ## Safety
 
@@ -85,11 +85,15 @@ python3 -I $C watch <ID>             # stream start / complete / abort / waiting
 
 `ui-send` is for existing indexed sessions. Use Computer use or `send --new` to create a session. `find`, `status`, `verify`, `wait`, and `watch` read all rollout segments for one session ID in timestamp order, including files with a `_segment-id` suffix. `wait` anchors to the matching delivery message, even if you start waiting after its turn has ended. A failed or mismatched reply exits nonzero. The offline tests do not prove real Codex UI delivery.
 
-**Codex → Claude Code:** `--app claude find <number or exact title>` → `status <ID> -n 0` → `compose --from-agent Codex --from-session <five-digit number> --to <Claude ID> --file body.txt --out msg.txt` → `--app claude send <Claude ID> --file msg.txt` → `--app claude verify <ID> --text <unique marker>` → `--app claude wait <ID> --text <unique marker>`. The CLI must be signed in to the same account as the Claude desktop App; missing or mismatched account IDs refuse before sending. The SendMessage tool result must contain `success:true` and `msg_id`, and its call must match the complete title and body exactly. Claude's reply header is `【回复】Claude Code·NNNN → Codex·NNNNN`; Claude uses courier to deliver that reply back to Codex. See [SKILL.md](skills/courier/SKILL.md) for the full round trip.
+**Codex → Claude Code:** `--app claude find <number or exact title>` → `status <ID> -n 0` → `compose --from-agent Codex --from-session <five-digit number> --to <Claude ID> --file body.txt --out msg.txt` → `--app claude send <full Claude CLI session ID> --file msg.txt` → `--app claude verify <ID> --text <unique marker>` → `--app claude wait <ID> --text <unique marker>`. Send requires the full ID because local and remote sessions may share a title. The CLI must be signed in to the same account as Claude Desktop, and the target must be in that desktop account's local metadata. One exact `SendMessage` call must return a Claude Desktop route success, followed by a new exact message in the destination's local log; the desktop route does not return a `msg_id`. Claude's reply header is `【回复】Claude Code·NNNN → Codex·NNNNN`; Claude uses courier to deliver that reply back to Codex. See [SKILL.md](skills/courier/SKILL.md) for the full round trip.
+
+Courier targets desktop Apps: Codex binds `com.openai.codex` and its native window, and Claude send addresses a local Claude Desktop session. Browser extensions, web ChatGPT/Codex, and remote or cloud sessions are outside its delivery targets. DSH delivery uses CrossLab's `codex-relay` / `claude-relay` to a DSH App session; courier does not send to DSH.
 
 After `locate` finds a new session ID, run `wait-number <ID> --timeout 90` before using its five-digit number. It polls the session index and returns `编号未就绪` if the title is still unnumbered. The first `Codex·新建` delivery remains valid even when the new session has a bootstrap user message before that delivery, provided there was no earlier headed delivery or assistant reply.
 
 `ui-switch` and `ui-send` wait up to 30 seconds for Codex to leave the foreground (`--front-timeout <seconds>` adjusts this). If Codex stays frontmost, they do not switch or write. The native bridge checks again just before AX actions. If Codex comes forward during a switch, the operation stops and attempts to restore the original tab; an unconfirmed restoration is reported explicitly.
+
+The foreground check uses macOS `NSWorkspace.frontmostApplication` first. Duplicate active processes of another App, such as Chrome, do not block a background Codex delivery; a confirmed frontmost Codex App does.
 
 `verify` polls for up to 30 seconds by default because the session log may lag after Send returns. Use `--timeout 0` for a single immediate check.
 

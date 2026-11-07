@@ -5,6 +5,16 @@ import AppKit
 import Darwin
 import Foundation
 
+// The foreground guard needs only the owning desktop App's bundle ID. It
+// runs before window discovery, so it cannot depend on a visible Codex tab.
+if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "frontmost" {
+    let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+    let result: [String: Any] = ["ok": bundle != nil, "bundle_id": bundle ?? ""]
+    let data = try! JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+    print(String(data: data, encoding: .utf8)!)
+    exit(bundle == nil ? 2 : 0)
+}
+
 // Pure decisions are also exercised by the offline fixture mode below.
 func resolvedTitle(_ window: String, _ toolbars: Int, _ staticTexts: [String], _ radios: [String]) -> String? {
     guard !window.isEmpty, window != "ChatGPT" else { return nil }
