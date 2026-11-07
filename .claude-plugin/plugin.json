@@ -1,7 +1,7 @@
 {
   "name": "agent-courier",
   "displayName": "Courier (投递)",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Deliver messages into Codex desktop-app sessions in the background without stealing focus, confirm delivery from the session log, and continue the task from the reply.",
   "author": {
     "name": "marave"

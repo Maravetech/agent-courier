@@ -18,6 +18,10 @@ SCRIPT = os.path.join(os.path.dirname(__file__), "..", "skills", "courier", "scr
 spec = importlib.util.spec_from_file_location("courier_under_test", SCRIPT)
 courier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(courier)
+OVERLAY_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "skills", "courier", "scripts", "overlay_controller.py")
+overlay_spec = importlib.util.spec_from_file_location("overlay_under_test", OVERLAY_SCRIPT)
+overlay = importlib.util.module_from_spec(overlay_spec)
+overlay_spec.loader.exec_module(overlay)
 
 TID = "01aaaaaa-0000-7000-8000-000000000001"
 TID2 = "01aaaaaa-0000-7000-8000-000000000002"
@@ -60,6 +64,7 @@ class CourierTest(unittest.TestCase):
             f.write(msg("2026-01-01T00:00:00.000Z", "user", "archived marker-77") + "\n")
         self.env = dict(os.environ, CODEX_HOME=home, COURIER_STATE_DIR=os.path.join(home, "state"))
         self.env.pop("COURIER_AGENTS", None)
+        self.env["COURIER_OVERLAY"] = "0"
 
     def tearDown(self):
         courier.LOGDIR = self.old_logdir
@@ -928,6 +933,102 @@ class CourierTest(unittest.TestCase):
              patch.object(courier, 'native_ui_action', side_effect=answers) as native:
             self.assertEqual(courier.cmd_ui_send(args), 0)
         self.assertEqual([call.args[0] for call in native.call_args_list], ['tab', 'send'])
+    def test_overlay_disabled_has_no_state_or_process(self):
+        code, out = self.run_cli("overlay", "pair", "--from", "0102", "--to", TID,
+                                 "--state", "sending")
+        self.assertEqual(code, 0, out)
+        self.assertFalse(Path(self.env["COURIER_STATE_DIR"], "overlay").exists())
+
+    def test_overlay_pair_state_and_archive(self):
+        state = Path(self.tmp.name, "overlay")
+        with patch.object(overlay, "STATE_DIR", state), patch.object(overlay, "STATE_FILE", state / "pairs.json"), \
+             patch.object(overlay, "LINKS_FILE", state / "links.json"):
+            overlay.update_pair("Claude Code·0102", "Codex·00172", "sending")
+            overlay.update_pair("Claude Code·0102", "Codex·00172", "working")
+            overlay.update_pair("Codex·00172", "Codex·00165", "sending")
+            pairs = overlay.read_pairs()
+            self.assertEqual(len(pairs), 2)
+            self.assertEqual(pairs[0]["state"], "working")
+            overlay.update_pair("Claude Code·0102", "Codex·00172", "archived_source")
+            self.assertEqual(len(overlay.read_pairs()), 2)
+            with self.assertRaises(ValueError):
+                overlay.update_pair("not-a-number", "Codex·00172", "sending")
+
+    def test_overlay_link_disconnect_blocks_send_and_reconnects(self):
+        state = Path(self.tmp.name, "overlay")
+        sender, recipient = "Claude Code·0102", "Codex·00172"
+        with patch.object(overlay, "STATE_DIR", state), patch.object(overlay, "STATE_FILE", state / "pairs.json"), \
+             patch.object(overlay, "LINKS_FILE", state / "links.json"):
+            with self.assertRaises(ValueError):
+                overlay.set_link(sender, recipient, False)
+            overlay.update_pair(sender, recipient, "idle")
+            overlay.set_link(sender, recipient, False)
+            self.assertTrue(overlay.is_disconnected(sender, recipient))
+            with self.assertRaises(PermissionError):
+                overlay.update_pair(sender, recipient, "sending")
+            overlay.set_link(sender, recipient, True)
+            self.assertFalse(overlay.is_disconnected(sender, recipient))
+            overlay.update_pair(sender, recipient, "sending")
+            self.assertEqual(overlay.read_pairs()[0]["state"], "sending")
+            overlay.set_link(sender, recipient, False)
+            overlay.update_pair(sender, recipient, "archived_source")
+            self.assertTrue(overlay.is_disconnected(sender, recipient))
+
+    def test_disconnected_link_refuses_send_before_process_spawn(self):
+        body = Path(self.tmp.name, "body.txt")
+        body.write_text("【投递】Claude Code·0007 → Codex·00159\nfixture", encoding="utf-8")
+        args = SimpleNamespace(file=str(body), new=False, key=TID, sandbox="workspace-write", cwd=None)
+        with patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")), \
+             patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "overlay_check", return_value=5), \
+             patch.object(courier.subprocess, "Popen") as start:
+            self.assertEqual(courier.cmd_send(args), 5)
+        start.assert_not_called()
+
+    def test_disconnected_link_refuses_ui_send_before_ui_touch(self):
+        body = Path(self.tmp.name, "body-ui.txt")
+        body.write_text("【投递】Claude Code·0007 → Codex·00159\nfixture", encoding="utf-8")
+        args = SimpleNamespace(file=str(body), session_id=TID, expect_tab="00159 test target")
+        with patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")), \
+             patch.object(courier, "overlay_check", return_value=5), patch.object(courier, "cua_target") as target:
+            self.assertEqual(courier.cmd_ui_send(args), 5)
+        target.assert_not_called()
+
+    def test_overlay_existing_app_is_not_started_twice(self):
+        app = Path(self.tmp.name, "courier-overlay")
+        app.write_text("")
+        with patch.dict(os.environ, {"COURIER_OVERLAY": "1"}), patch.object(overlay, "app_path", return_value=app), \
+             patch.object(overlay, "STATE_DIR", Path(self.tmp.name, "overlay")), \
+             patch.object(overlay.subprocess, "run", return_value=SimpleNamespace(stdout=f"{app} /tmp/pairs.json\n")) as run, \
+             patch.object(overlay.subprocess, "Popen") as start:
+            overlay.ensure_app()
+        self.assertIn("-awwxo", run.call_args.args[0])
+        start.assert_not_called()
+
+    def test_overlay_emits_codex_to_codex(self):
+        with patch.dict(os.environ, {"COURIER_OVERLAY": "1"}), patch.object(courier.subprocess, "run") as run:
+            courier.overlay_emit("sending", "【投递】Codex·00159 → Codex·00160\nfixture")
+            arguments = run.call_args.args[0]
+            self.assertIn("Codex·00159", arguments)
+            self.assertIn("Codex·00160", arguments)
+
+    def test_watch_completion_updates_overlay_from_verified_reply(self):
+        path = glob.glob(os.path.join(self.tmp.name, "sessions", "*", "*", "*", "rollout-*.jsonl"))[0]
+        seen = []
+        with patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")), \
+             patch.object(courier, "APP", "codex"), patch.object(courier, "overlay_enabled", return_value=True), \
+             patch.object(courier, "overlay_emit", side_effect=lambda *args: seen.append(args)):
+            args = SimpleNamespace(keys=[TID], since="2026-01-02T00:00:00Z", timeout=1, interval=0.01)
+            self.assertEqual(courier.cmd_watch_once(args), 0)
+        self.assertTrue(any(item[0] == "replied" for item in seen), seen)
+        with open(path, "r+", encoding="utf-8") as f:
+            content = f.read().replace("【回复】Codex·00159 → Claude Code·0007", "wrong header")
+            f.seek(0); f.write(content); f.truncate()
+        seen.clear()
+        with patch.object(courier, "CODEX", self.tmp.name), patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")), \
+             patch.object(courier, "APP", "codex"), patch.object(courier, "overlay_enabled", return_value=True), \
+             patch.object(courier, "overlay_emit", side_effect=lambda *args: seen.append(args)):
+            self.assertEqual(courier.cmd_watch_once(args), 0)
+        self.assertTrue(any(item[0] == "wrong_header" for item in seen), seen)
 
 
 CID = "aaaaaaaa-1111-4222-8333-444444444444"
