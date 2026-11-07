@@ -109,18 +109,13 @@ def update_pair(sender, recipient, state, reason=""):
             raise PermissionError("这对会话已在菜单栏断开，请先点关联")
         current = read_pairs()
         pairs = [p for p in current if (p.get("from_app"), p.get("from"), p.get("to_app"), p.get("to")) != (from_app, from_id, to_app, to_id)]
-        if state != "archived_source":
-            old = next((p for p in current if (p.get("from_app"), p.get("from"), p.get("to_app"), p.get("to")) == (from_app, from_id, to_app, to_id)), {})
-            now = time.time()
-            motion_at = (old.get("motion_at", old.get("updated_at", now)) if state in ("delivered", "working")
-                         else now)
-            pairs.append({**old, "from_app": from_app, "from": from_id, "to_app": to_app, "to": to_id,
-                          "state": state, "reason": reason[:60], "updated_at": now, "motion_at": motion_at})
+        old = next((p for p in current if (p.get("from_app"), p.get("from"), p.get("to_app"), p.get("to")) == (from_app, from_id, to_app, to_id)), {})
+        now = time.time()
+        motion_at = (old.get("motion_at", old.get("updated_at", now)) if state in ("delivered", "working")
+                     else now)
+        pairs.append({**old, "from_app": from_app, "from": from_id, "to_app": to_app, "to": to_id,
+                      "state": state, "reason": reason[:60], "updated_at": now, "motion_at": motion_at})
         atomic_write({"pairs": pairs})
-        if state == "archived_source":
-            links = read_links()
-            links.discard(pair_key(sender, recipient))
-            LINKS_FILE.write_text(json.dumps({"disconnected": sorted(links)}, ensure_ascii=False))
     return pairs
 
 

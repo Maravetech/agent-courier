@@ -37,6 +37,8 @@ Each pair uses one transparent CA window covering the route and its two rings. I
 
 For Claude Computer use, first call `python3 -I skills/courier/scripts/courier.py overlay check --from 'Claude Code·0064' --to 'Codex·00165'`; exit code 5 means stop without sending. Then call `overlay pair --from ... --to ... --state sending` immediately before sending. Codex-to-Codex pairs use `Codex·NNNNN` on both sides. The native App watches Codex rollout files and advances delivery states; `verify`, `wait`, and `watch` also report progress. The Python overlay controller is a one-shot command. `COURIER_OVERLAY=0` turns the visual off but does not bypass a disconnected link.
 
+The on-demand pair panel groups sessions by App and shows titles, direction, peer, status, and activity time. `courier.py overlay list [--json]` uses the same native session catalog. Confirmed archived or missing sessions move to an invalid group and stop rendering; unreadable indexes remain unknown. Cleanup removes only selected invalid pairs and their disconnected links under state.lock.
+
 ## Install
 
 **Claude Code** (plugin):

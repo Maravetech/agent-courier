@@ -950,7 +950,7 @@ class CourierTest(unittest.TestCase):
             self.assertEqual(len(pairs), 2)
             self.assertEqual(pairs[0]["state"], "working")
             overlay.update_pair("Claude Code·0102", "Codex·00172", "archived_source")
-            self.assertEqual(len(overlay.read_pairs()), 1)
+            self.assertEqual(len(overlay.read_pairs()), 2)
             with self.assertRaises(ValueError):
                 overlay.update_pair("not-a-number", "Codex·00172", "sending")
 
@@ -972,7 +972,7 @@ class CourierTest(unittest.TestCase):
             self.assertEqual(overlay.read_pairs()[0]["state"], "sending")
             overlay.set_link(sender, recipient, False)
             overlay.update_pair(sender, recipient, "archived_source")
-            self.assertFalse(overlay.is_disconnected(sender, recipient))
+            self.assertTrue(overlay.is_disconnected(sender, recipient))
 
     def test_disconnected_link_refuses_send_before_process_spawn(self):
         body = Path(self.tmp.name, "body.txt")

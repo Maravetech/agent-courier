@@ -696,6 +696,18 @@ def cmd_overlay_pair(a):
     return result.returncode
 
 
+def cmd_overlay_list(a):
+    controller = os.path.join(os.path.dirname(__file__), "overlay_controller.py")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("courier_overlay", controller)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not module.app_path().is_file():
+        print("浮层 App 尚未构建，请先运行 sh overlay/build.sh", file=sys.stderr)
+        return 1
+    return subprocess.call([str(module.app_path()), str(module.STATE_FILE), "--list"] + (["--json"] if a.json else []))
+
+
 def cmd_overlay_status(a):
     controller = os.path.join(os.path.dirname(__file__), "overlay_controller.py")
     return subprocess.call([sys.executable, "-I", controller, "--status"])
@@ -1483,6 +1495,7 @@ def main():
     pair.add_argument("--to", required=True); pair.add_argument("--state", required=True,
         choices=["idle", "pending", "sending", "delivered", "working", "replied", "wrong_header", "error", "stuck", "archived_source", "archived_target"])
     pair.add_argument("--reason"); pair.set_defaults(fn=cmd_overlay_pair)
+    listing = overlay_sub.add_parser("list"); listing.add_argument("--json", action="store_true"); listing.set_defaults(fn=cmd_overlay_list)
     overlay_sub.add_parser("status").set_defaults(fn=cmd_overlay_status)
     check = overlay_sub.add_parser("check"); check.add_argument("--from", dest="from_session", required=True)
     check.add_argument("--to", required=True); check.set_defaults(fn=cmd_overlay_check)

@@ -36,6 +36,8 @@
 
 Claude Computer use 发送前先运行 `python3 -I skills/courier/scripts/courier.py overlay check --from 'Claude Code·0064' --to 'Codex·00165'`；退出码 5 时停止投递，再运行 `overlay pair --from ... --to ... --state sending`。Codex→Codex 也支持。原生 App 监听 Codex rollout 文件并推进状态，Python 控制命令一次性退出；`watch`、`verify`、`wait` 也会更新。`COURIER_OVERLAY=0` 关闭浮层但不绕过断开门禁。DSH 属于第二期。
 
+按需配对面板按 App 分组，展示会话标题、收发方向、对端、状态和最后往来时间。`courier.py overlay list [--json]` 与面板、浮层共用原生会话目录。明确归档或不存在的配对进入「已失效」并停止绘制，索引读不到时保留编号、不判失效；清理在 state.lock 下只删除指定失效配对及其断开记录。
+
 ## 安装
 
 **Claude Code**（插件）：

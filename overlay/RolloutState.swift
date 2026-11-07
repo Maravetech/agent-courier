@@ -7,8 +7,8 @@ final class RolloutTracker {
     private var anchored = false, reply = "", state = "working"
     func read(_ path: String, senderApp: String, sender: String, targetApp: String, target: String) -> String? {
         guard let file = fopen(path, "r") else { return nil }
-        var buffer: UnsafeMutablePointer<CChar>?, capacity = 0
-        defer { free(buffer); fclose(file) }
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: 65536)
+        defer { buffer.deallocate(); fclose(file) }
         let delivery = "【投递】\(senderApp)·\(sender) → \(targetApp)·\(target)"
         let expected = "【回复】\(targetApp)·\(target) → \(senderApp)·\(sender)"
         var info = stat()
@@ -18,18 +18,21 @@ final class RolloutTracker {
         }
         inode = UInt64(info.st_ino)
         fseeko(file, offset, SEEK_SET)
-        while getline(&buffer, &capacity, file) >= 0 {
-            guard let buffer else { break }
-            guard strlen(buffer) > 0, buffer[strlen(buffer)-1] == 10 else { break }
-            offset = ftello(file)
-            let relevant = ["message", "task_started", "task_complete", "turn_aborted", "task_failed", "turn_failed"].contains {
-                strstr(buffer, "\"type\":\"\($0)\"") != nil || strstr(buffer, "\"type\": \"\($0)\"") != nil
+        var pending = Data(), skipping = false
+        while fgets(buffer, 65536, file) != nil {
+            let length = strlen(buffer), ended = length > 0 && buffer[length-1] == 10
+            if pending.isEmpty && !skipping {
+                skipping = !["message", "task_started", "task_complete", "turn_aborted", "task_failed", "turn_failed"].contains {
+                    strstr(buffer, "\"type\":\"\($0)\"") != nil || strstr(buffer, "\"type\": \"\($0)\"") != nil
+                }
             }
-            guard relevant else { continue }
-            let line = String(cString: buffer)
+            if !skipping { pending.append(UnsafeRawPointer(buffer).assumingMemoryBound(to: UInt8.self), count: length) }
+            guard ended else { continue }
+            offset = ftello(file)
+            defer { pending.removeAll(keepingCapacity: false); skipping = false }
+            guard !skipping else { continue }
             autoreleasepool {
-                guard let data = line.data(using: .utf8),
-                      let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                guard let row = try? JSONSerialization.jsonObject(with: pending) as? [String: Any],
                       let body = row["payload"] as? [String: Any] else { return }
                 if row["type"] as? String == "response_item", body["type"] as? String == "message" {
                     let text = (body["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined()

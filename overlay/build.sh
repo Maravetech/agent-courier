@@ -7,9 +7,9 @@ rm -f "$app"/Contents/Resources/bird-*.png "$app"/Contents/Resources/bird-*.svg 
 clang -O2 -fobjc-arc -c "$here/CAWindowBridge.m" -o "$app/Contents/Resources/CAWindowBridge.o"
 swiftc -O -framework Foundation -framework ApplicationServices -framework CoreGraphics -framework QuartzCore \
   "$here/CodeBirdArt.swift" "$here/CABirdNode.swift" "$here/CAParticles.swift" "$here/PairPalette.swift" "$here/CAOverlayRenderer.swift" \
-  "$here/RolloutState.swift" "$here/SidebarLocator.swift" "$here/CourierOverlay.swift" "$app/Contents/Resources/CAWindowBridge.o" \
+  "$here/PairDirectory.swift" "$here/RolloutState.swift" "$here/SidebarLocator.swift" "$here/CourierOverlay.swift" "$app/Contents/Resources/CAWindowBridge.o" \
   -o "$app/Contents/MacOS/courier-overlay"
-swiftc -O -parse-as-library -framework AppKit "$here/PairPalette.swift" "$here/CourierPanel.swift" -o "$app/Contents/MacOS/courier-panel"
+swiftc -O -parse-as-library -framework AppKit "$here/PairDirectory.swift" "$here/PairPalette.swift" "$here/CourierPanel.swift" -o "$app/Contents/MacOS/courier-panel"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

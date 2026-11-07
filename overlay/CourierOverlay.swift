@@ -36,6 +36,7 @@ private final class Overlay {
     private var lastData = Data()
     private var lastConfig = Data(), lastLinks = Data()
     private var lastLocate = 0.0
+    private var invalidKeys = Set<String>()
     private var exitGeneration = 0
     private let fixture = ProcessInfo.processInfo.environment["COURIER_OVERLAY_FIXTURE"] == "1"
     private let visualProbe = ProcessInfo.processInfo.environment["COURIER_OVERLAY_VISUAL_PROBE"] == "1"
@@ -64,6 +65,7 @@ private final class Overlay {
             source.setCancelHandler { Darwin.close(fd) }
             source.resume(); fileSource = source
         }
+        invalidKeys = PairDirectory.load(stateURL).invalidKeys
         reload(force: true)
         RunLoop.main.run()
     }
@@ -141,8 +143,9 @@ private final class Overlay {
         }
         if !visualProbe { watchRollouts(all) }
         let disconnectedKeys = disconnected
-        let selected = enabled ? Array(all.filter { $0.state != "archived_source" }
+        let selected = enabled ? Array(all.filter { !invalidKeys.contains($0.key) && $0.state != "archived_source" }
             .sorted { $0.updated_at > $1.updated_at }.prefix(10)) : []
+        let slots = PairPalette.slots(for: selected.map(\.key))
         var entries: [CAEntry] = [], sourceOffsets: [String: Int] = [:]
         for pair in selected {
             let a = fixture ? pair.source.map { CGPoint(x: $0.x, y: $0.y) } : locator.locate(app: pair.from_app, number: pair.from)
@@ -150,7 +153,7 @@ private final class Overlay {
             guard let a, let b else { continue }
             let sender = "\(pair.from_app)·\(pair.from)"
             let offset = sourceOffsets[sender, default: 0]; sourceOffsets[sender] = offset+1
-            entries.append(CAEntry(key: pair.key,
+            entries.append(CAEntry(key: pair.key, colorSlot: slots[pair.key] ?? 0,
                 source: CGPoint(x: a.x-Double(offset)*9, y: a.y), target: b,
                 state: pair.state, motionAt: pair.motion_at ?? pair.updated_at,
                 disconnected: disconnectedKeys.contains(pair.key)))
@@ -208,52 +211,9 @@ private final class Overlay {
             motion_at: returning ? changedAt : item.motion_at ?? item.updated_at, source: item.source, target: item.target) : item }
         if let data = try? JSONEncoder().encode(Snapshot(pairs: updated)) { try? data.write(to: stateURL, options: .atomic) }
     }
-    private func archived(_ app: String, _ number: String) -> Bool {
-        if app == "Codex" {
-            guard let index = try? String(contentsOf: codexHome.appendingPathComponent("session_index.jsonl"), encoding: .utf8) else { return false }
-            let ids = index.split(separator: "\n").compactMap { line -> String? in
-                guard let row = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                      (row["thread_name"] as? String)?.hasPrefix(number + " ") == true else { return nil }
-                return row["id"] as? String
-            }
-            guard !ids.isEmpty else { return false }
-            var db: OpaquePointer?
-            let path = codexHome.appendingPathComponent("state_5.sqlite").path
-            guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else { return false }
-            defer { sqlite3_close(db) }
-            var found = 0
-            for id in ids {
-                var statement: OpaquePointer?
-                guard sqlite3_prepare_v2(db, "SELECT archived FROM threads WHERE id=?", -1, &statement, nil) == SQLITE_OK else { return false }
-                _ = id.withCString { sqlite3_bind_text(statement, 1, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
-                if sqlite3_step(statement) == SQLITE_ROW {
-                    found += 1
-                    if sqlite3_column_int(statement, 0) == 0 { sqlite3_finalize(statement); return false }
-                }
-                sqlite3_finalize(statement)
-            }
-            return found > 0
-        }
-        return false
-    }
-    private func archivedClaudeNumbers() -> Set<String> {
-        let root = fixture ? folder.deletingLastPathComponent().appendingPathComponent("claude") :
-            URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/Claude/claude-code-sessions")
-        guard let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else { return [] }
-        var status: [String: Bool] = [:]
-        for case let file as URL in files where file.pathExtension == "json" {
-            autoreleasepool {
-                guard let data = try? Data(contentsOf: file),
-                      let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let title = row["title"] as? String else { return }
-                let number = String(title.prefix(4))
-                guard number.count == 4, number.allSatisfy(\.isNumber), title.hasPrefix(number + " ") else { return }
-                status[number] = (status[number] ?? true) && ((row["isArchived"] as? Bool) == true)
-            }
-        }
-        return Set(status.compactMap { $0.value ? $0.key : nil })
-    }
     private func maintain() {
+        let invalid = PairDirectory.load(stateURL).invalidKeys
+        if invalid != invalidKeys { invalidKeys = invalid; reload(force: true) }
         let lock = Darwin.open(folder.appendingPathComponent("state.lock").path, O_CREAT | O_RDWR, mode_t(0o600))
         guard lock >= 0 else { return }
         defer { flock(lock, LOCK_UN); Darwin.close(lock) }
@@ -261,37 +221,12 @@ private final class Overlay {
         guard let data = try? Data(contentsOf: stateURL),
               let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
         let now = Date().timeIntervalSince1970
-        let claudeArchived = archivedClaudeNumbers()
-        var changed = false, retained: [Pair] = []
-        for pair in snapshot.pairs {
-            let sourceArchived = pair.from_app == "Claude Code" ? claudeArchived.contains(pair.from) : archived(pair.from_app, pair.from)
-            if sourceArchived { changed = true; continue }
-            if pair.state == "archived_target" && now - pair.updated_at >= 2.8 { changed = true; continue }
-            var item = pair
-            let targetArchived = pair.to_app == "Claude Code" ? claudeArchived.contains(pair.to) : archived(pair.to_app, pair.to)
-            if targetArchived, pair.state != "archived_target" {
-                item = pair.changing("archived_target", at: now); changed = true
-            } else if ["sending", "delivered", "working"].contains(pair.state),
-                      now - max(pair.updated_at, rolloutActivity[pair.key] ?? 0) >= 600 {
-                item = pair.changing("stuck", at: now); changed = true
-            }
-            retained.append(item)
+        let updated = snapshot.pairs.map { pair in
+            ["sending", "delivered", "working"].contains(pair.state) &&
+            now - max(pair.updated_at, rolloutActivity[pair.key] ?? 0) >= 600 ? pair.changing("stuck", at: now) : pair
         }
-        guard changed else { return }
-        if let output = try? JSONEncoder().encode(Snapshot(pairs: retained)) {
-            try? output.write(to: stateURL, options: .atomic)
-        }
-        let valid = Set(retained.map(\.key))
-        let links = folder.appendingPathComponent("links.json")
-        if let contents = try? Data(contentsOf: links),
-           let body = try? JSONSerialization.jsonObject(with: contents) as? [String: [String]],
-           let old = body["disconnected"] {
-            let fresh = old.filter { valid.contains($0) }
-            if fresh.count != old.count,
-               let output = try? JSONSerialization.data(withJSONObject: ["disconnected": fresh]) {
-                try? output.write(to: links, options: .atomic)
-            }
-        }
+        if zip(updated, snapshot.pairs).contains(where: { $0.state != $1.state }),
+           let output = try? JSONEncoder().encode(Snapshot(pairs: updated)) { try? output.write(to: stateURL, options: .atomic) }
     }
     private func maintenanceTick() {
         autoreleasepool {
@@ -318,6 +253,23 @@ private final class Overlay {
             let point = SidebarLocator(stateDirectory: base.appendingPathComponent("overlay"))
                 .locate(app: CommandLine.arguments[2], number: CommandLine.arguments[3])
             print(point.map { "x=\($0.x) y=\($0.y)" } ?? "not_visible")
+            return
+        }
+        if CommandLine.arguments.contains("--list") {
+            let report = PairDirectory.load(url)
+            if CommandLine.arguments.contains("--json"), let data = try? JSONEncoder().encode(report) {
+                print(String(decoding: data, as: UTF8.self))
+            } else {
+                print("\(report.apps) 个 App · \(report.sessions) 个会话开启投递 · \(report.displayed) 对正在显示 · \(report.invalid) 对已失效")
+                for app in ["Claude Code", "Codex", "已失效"] {
+                    print("\n\(app)")
+                    var emitted = Set<String>()
+                    for row in report.rows where app == "已失效" ? row.invalid : (!row.invalid && row.app == app) {
+                        if row.invalid && !emitted.insert(row.key).inserted { continue }
+                        print("\(row.number) \(row.title) · \(row.status) \(row.direction) \(row.peer) · \(Date(timeIntervalSince1970: row.updated_at)) \(row.reason)")
+                    }
+                }
+            }
             return
         }
         Overlay(url).start()

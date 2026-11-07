@@ -11,6 +11,7 @@ import QuartzCore
 
 struct CAEntry {
     let key: String
+    let colorSlot: Int
     let source: CGPoint
     let target: CGPoint
     let state: String
@@ -180,7 +181,6 @@ final class CAOverlayRenderer {
         let visible = Array(entries.prefix(PairPalette.colors.count))
         let valid = Set(visible.map(\.key))
         for key in pairs.keys.filter({ !valid.contains($0) }) { pairs.removeValue(forKey: key) }
-        let slots = PairPalette.slots(for: visible.map(\.key))
         let now = Date().timeIntervalSince1970
         for entry in visible {
             let bounds = CGRect(x: min(entry.source.x, entry.target.x)-32,
@@ -188,7 +188,7 @@ final class CAOverlayRenderer {
                                 width: abs(entry.target.x-entry.source.x)+64,
                                 height: abs(entry.target.y-entry.source.y)+64).integral
             let pixels = max(scale(entry.source), scale(entry.target))
-            let color = PairPalette.color(slots[entry.key] ?? 0)
+            let color = PairPalette.color(entry.colorSlot)
             if let existing = pairs[entry.key], existing.resolution != pixels { pairs.removeValue(forKey: entry.key) }
             if pairs[entry.key] == nil {
                 pairs[entry.key] = CAPairWindow(entry: entry, frame: bounds, resolution: pixels, art: art, color: color)
