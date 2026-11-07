@@ -20,9 +20,13 @@ final class RolloutTracker {
         fseeko(file, offset, SEEK_SET)
         while getline(&buffer, &capacity, file) >= 0 {
             guard let buffer else { break }
-            let line = String(cString: buffer)
-            guard line.hasSuffix("\n") else { break }
+            guard strlen(buffer) > 0, buffer[strlen(buffer)-1] == 10 else { break }
             offset = ftello(file)
+            let relevant = ["message", "task_started", "task_complete", "turn_aborted", "task_failed", "turn_failed"].contains {
+                strstr(buffer, "\"type\":\"\($0)\"") != nil || strstr(buffer, "\"type\": \"\($0)\"") != nil
+            }
+            guard relevant else { continue }
+            let line = String(cString: buffer)
             autoreleasepool {
                 guard let data = line.data(using: .utf8),
                       let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

@@ -66,3 +66,7 @@ print(state ?? "unchanged")
         self.check_states(rows, 'error')
         rows += [self.event('task_started'), self.event('task_complete', last_agent_message='错误抬头')]
         self.check_states(rows, 'wrong_header')
+
+    def test_large_tool_output_does_not_lose_delivery(self):
+        rows = self.anchor()+[dict(type='response_item', payload=dict(type='custom_tool_call_output', output='x'*2_000_000)), self.message('user','继续'), self.event('task_complete', last_agent_message='【回复】Codex·00172 → Claude Code·0102\n完成')]
+        self.check_states(rows, 'replied')
