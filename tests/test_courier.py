@@ -9,6 +9,7 @@ import unittest
 import importlib.util
 import glob
 import io
+import shlex
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,10 @@ SCRIPT = os.path.join(os.path.dirname(__file__), "..", "skills", "courier", "scr
 spec = importlib.util.spec_from_file_location("courier_under_test", SCRIPT)
 courier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(courier)
+GATE_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "skills", "courier", "scripts", "claude_send_gate.py")
+gate_spec = importlib.util.spec_from_file_location("claude_send_gate_under_test", GATE_SCRIPT)
+gate = importlib.util.module_from_spec(gate_spec)
+gate_spec.loader.exec_module(gate)
 OVERLAY_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "skills", "courier", "scripts", "overlay_controller.py")
 overlay_spec = importlib.util.spec_from_file_location("overlay_under_test", OVERLAY_SCRIPT)
 overlay = importlib.util.module_from_spec(overlay_spec)
@@ -1249,6 +1254,41 @@ class ClaudeBackendTest(unittest.TestCase):
                            capture_output=True, text=True, env=self.env)
         return r.returncode, r.stdout + r.stderr
 
+    def approved_cli_result(self, argv, body, title='0009 review'):
+        self.assertEqual(argv[argv.index('--tools') + 1], 'ListAgents,SendMessage')
+        self.assertEqual(argv[argv.index('--allowedTools') + 1:argv.index('--settings')],
+                         ['ListAgents', 'SendMessage'])
+        settings = json.loads(Path(argv[argv.index('--settings') + 1]).read_text())
+        command = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
+        state_path = shlex.split(command)[-1]
+        self.assertIn('claude_send_gate.py', command)
+        payload = json.loads(argv[2].split('\n', 1)[1])
+        self.assertEqual(payload, {'to': title, 'message': body})
+        session = 'fixture-cli-session'
+        listing = 'Peer sessions (1):\n  ' + title + ' [a4d29e]  ·  interactive  ·  busy  ·  Claude Desktop session  ·  started 1m ago'
+        response = {'listing': listing, 'sections': [{
+            'kind': 'sessions', 'total': 1,
+            'rows': [{'name': title, 'ref': 'a4d29e', 'status': 'busy', 'type': 'interactive'}]}]}
+        self.assertTrue(gate.run_hook(state_path, {'hook_event_name': 'PreToolUse',
+            'tool_name': 'ListAgents', 'tool_input': {}, 'session_id': session}))
+        self.assertTrue(gate.run_hook(state_path, {'hook_event_name': 'PostToolUse',
+            'tool_name': 'ListAgents', 'tool_response': response, 'session_id': session}))
+        self.assertTrue(gate.run_hook(state_path, {'hook_event_name': 'PreToolUse',
+            'tool_name': 'SendMessage', 'tool_input': payload, 'session_id': session}))
+        stream = [
+            {'type': 'assistant', 'message': {'content': [{
+                'type': 'tool_use', 'id': 'list-1', 'name': 'ListAgents', 'input': {}}]}},
+            {'type': 'user', 'message': {'content': [{
+                'type': 'tool_result', 'tool_use_id': 'list-1', 'content': json.dumps(response)}]}},
+            {'type': 'assistant', 'message': {'content': [{
+                'type': 'tool_use', 'id': 'send-1', 'name': 'SendMessage', 'input': payload}]}},
+            {'type': 'user', 'message': {'content': [{
+                'type': 'tool_result', 'tool_use_id': 'send-1',
+                'content': json.dumps({'success': True, 'msg_id': 'fixture-msg-1'})}]}}
+        ]
+        return SimpleNamespace(returncode=0, stdout='\n'.join(json.dumps(x, ensure_ascii=False)
+                                                           for x in stream), stderr='')
+
     def test_find_uses_latest_title(self):
         code, out = self.cli("find", "0009")
         self.assertEqual(code, 0, out)
@@ -1317,32 +1357,21 @@ class ClaudeBackendTest(unittest.TestCase):
              patch.object(subprocess, 'run', side_effect=AssertionError('must not send')):
             self.assertEqual(courier.cmd_send_claude(args), 2)
 
-    def test_claude_send_uses_local_desktop_id_and_reports_acceptance(self):
+    def test_claude_send_uses_unique_live_desktop_title_and_reports_acceptance(self):
         body = '【投递】Codex·00159 → Claude Code·0009\n\nlocal-id-marker'
         body_path = Path(self.tmp.name) / 'local-body.txt'
         body_path.write_text(body, encoding='utf-8')
         path = Path(self.env['CLAUDE_CONFIG_DIR']) / 'projects' / '-tmp-proj' / f'{CID}.jsonl'
         args = SimpleNamespace(key=CID, file=str(body_path), new=False)
         def fake_cli(argv, **_kwargs):
-            prompt = json.loads(argv[2].split('\n', 1)[1])
-            self.assertEqual(prompt['to'], 'local_' + CID)
-            self.assertEqual(prompt['message'], body)
-            stream = [
-                {'type': 'assistant', 'message': {'content': [
-                    {'type': 'tool_use', 'id': 'u1', 'name': 'SendMessage',
-                     'input': {'to': 'local_' + CID, 'message': body}}]}},
-                {'type': 'user', 'message': {'content': [
-                    {'type': 'tool_result', 'tool_use_id': 'u1',
-                     'content': json.dumps({'success': True,
-                         'message': "Forwarded to Claude Desktop's session messaging: sent."})}]}}
-            ]
+            result = self.approved_cli_result(argv, body)
             with path.open('a', encoding='utf-8') as handle:
                 handle.write(json.dumps({'type': 'user', 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                     'isMeta': True, 'turnOrigin': 'peer', 'message': {'role': 'user',
                     'content': 'Another Claude session sent a message:\n'
                                '<cross-session-message from="fixture">\n' + body +
                                '\n</cross-session-message>'}}, ensure_ascii=False) + '\n')
-            return SimpleNamespace(returncode=0, stdout='\n'.join(json.dumps(x) for x in stream), stderr='')
+            return result
         with patch.object(courier, 'APP', 'claude'), \
              patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
              patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
@@ -1362,23 +1391,14 @@ class ClaudeBackendTest(unittest.TestCase):
         with path.open('a', encoding='utf-8') as handle:
             handle.write(json.dumps({'type': 'user', 'timestamp': '2026-01-03T00:00:01Z',
                 'message': {'role': 'user', 'content': 'current turn'}}) + '\n')
-        target = 'local_' + CID
-        stream = '\n'.join(json.dumps(x, ensure_ascii=False) for x in [
-            {'type': 'assistant', 'message': {'content': [
-                {'type': 'tool_use', 'id': 'u1', 'name': 'SendMessage',
-                 'input': {'to': target, 'message': body}}]}},
-            {'type': 'user', 'message': {'content': [
-                {'type': 'tool_result', 'tool_use_id': 'u1', 'content': json.dumps({
-                    'success': True,
-                    'message': "Forwarded to Claude Desktop's session messaging: queued."})}]}}
-        ])
+        def fake_cli(argv, **_kwargs):
+            return self.approved_cli_result(argv, body)
         with patch.object(courier, 'APP', 'claude'), \
              patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
              patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
              patch.object(courier, 'claude_account_ready', return_value=(True, '')), \
              patch.dict(os.environ, {'HOME': self.tmp.name}), \
-             patch.object(subprocess, 'run', return_value=SimpleNamespace(
-                 returncode=0, stdout=stream, stderr='')) as run, \
+             patch.object(subprocess, 'run', side_effect=fake_cli) as run, \
              redirect_stdout(io.StringIO()) as output:
             self.assertTrue(courier.claude_scan(str(path))[1])
             self.assertEqual(courier.cmd_send_claude(SimpleNamespace(
@@ -1387,6 +1407,43 @@ class ClaudeBackendTest(unittest.TestCase):
         self.assertIn('送达待 verify', output.getvalue())
         code, _ = self.cli('verify', CID, '--text', 'queued-marker', '--timeout', '0')
         self.assertEqual(code, 1)
+
+    def test_claude_send_refuses_remote_title_duplicate_before_sendmessage(self):
+        body = '【投递】Codex·00159 → Claude Code·0009\n\nremote-duplicate-marker'
+        body_path = Path(self.tmp.name) / 'duplicate-body.txt'
+        body_path.write_text(body, encoding='utf-8')
+        def fake_cli(argv, **_kwargs):
+            settings = json.loads(Path(argv[argv.index('--settings') + 1]).read_text())
+            state_path = shlex.split(settings['hooks']['PreToolUse'][0]['hooks'][0]['command'])[-1]
+            response = {
+                'listing': ('Peer sessions (2):\n'
+                    '  0009 review [a4d29e]  ·  interactive  ·  busy  ·  Claude Desktop session  ·  started 1m ago\n'
+                    '  0009 review [b5e30f]  ·  interactive  ·  idle  ·  Remote Control session  ·  started 2m ago'),
+                'sections': [{'kind': 'sessions', 'total': 2, 'rows': [
+                    {'name': '0009 review', 'ref': 'a4d29e', 'status': 'busy'},
+                    {'name': '0009 review', 'ref': 'b5e30f', 'status': 'idle'}]}]}
+            session = 'fixture-cli-session'
+            self.assertTrue(gate.run_hook(state_path, {'hook_event_name': 'PreToolUse',
+                'tool_name': 'ListAgents', 'tool_input': {}, 'session_id': session}))
+            self.assertFalse(gate.run_hook(state_path, {'hook_event_name': 'PostToolUse',
+                'tool_name': 'ListAgents', 'tool_response': response, 'session_id': session}))
+            self.assertFalse(gate.run_hook(state_path, {'hook_event_name': 'PreToolUse',
+                'tool_name': 'SendMessage', 'tool_input': {'to': '0009 review', 'message': body},
+                'session_id': session}))
+            list_call = {'type': 'assistant', 'message': {'content': [{
+                'type': 'tool_use', 'id': 'list-1', 'name': 'ListAgents', 'input': {}}]}}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(list_call), stderr='')
+        with patch.object(courier, 'APP', 'claude'), \
+             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
+             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
+             patch.object(courier, 'claude_account_ready', return_value=(True, '')), \
+             patch.dict(os.environ, {'HOME': self.tmp.name}), \
+             patch.object(subprocess, 'run', side_effect=fake_cli) as run, \
+             redirect_stderr(io.StringIO()) as output:
+            self.assertEqual(courier.cmd_send_claude(SimpleNamespace(
+                key=CID, file=str(body_path), new=False)), 2)
+        run.assert_called_once()
+        self.assertIn('未执行 SendMessage', output.getvalue())
 
     def test_claude_send_honors_disconnected_pair_gate_before_cli(self):
         body_path = Path(self.tmp.name) / 'gated-body.txt'
@@ -1455,23 +1512,14 @@ class ClaudeBackendTest(unittest.TestCase):
             handle.write(json.dumps({'type': 'assistant', 'timestamp': '2026-01-03T00:00:02Z',
                 'message': {'role': 'assistant', 'stop_reason': 'end_turn',
                             'content': [{'type': 'text', 'text': 'done'}]}}) + '\n')
-        target = 'local_' + CID
-        stream = '\n'.join(json.dumps(x, ensure_ascii=False) for x in [
-            {'type': 'assistant', 'message': {'content': [
-                {'type': 'tool_use', 'id': 'u1', 'name': 'SendMessage',
-                 'input': {'to': target, 'message': body}}]}},
-            {'type': 'user', 'message': {'content': [
-                {'type': 'tool_result', 'tool_use_id': 'u1', 'content': json.dumps({
-                    'success': True,
-                    'message': "Forwarded to Claude Desktop's session messaging: sent."})}]}}
-        ])
+        def fake_cli(argv, **_kwargs):
+            return self.approved_cli_result(argv, body)
         with patch.object(courier, 'APP', 'claude'), \
              patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
              patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
              patch.object(courier, 'claude_account_ready', return_value=(True, '')), \
              patch.dict(os.environ, {'HOME': self.tmp.name}), \
-             patch.object(subprocess, 'run', return_value=SimpleNamespace(
-                 returncode=0, stdout=stream, stderr='')) as run, \
+             patch.object(subprocess, 'run', side_effect=fake_cli) as run, \
              redirect_stdout(io.StringIO()) as output:
             self.assertEqual(courier.cmd_send_claude(SimpleNamespace(
                 key=CID, file=str(body_path), new=False)), 0)
@@ -1529,6 +1577,80 @@ class ClaudeBackendTest(unittest.TestCase):
              patch.object(courier, 'claude_account_ready', return_value=(False, '账号不一致')), \
              patch.object(subprocess, 'run', side_effect=AssertionError('must not send')):
             self.assertEqual(courier.cmd_send_claude(args), 2)
+
+
+class ClaudeSendGateTest(unittest.TestCase):
+    def setUp(self):
+        self.title = '0009 review'
+        self.body = '【投递】Codex·00159 → Claude Code·0009\n\nmarker'
+        import hashlib
+        self.state = {'title': self.title,
+                      'body_sha256': hashlib.sha256(self.body.encode()).hexdigest(),
+                      'session_id': '', 'list_attempts': 0, 'list_verified': False,
+                      'send_attempts': 0, 'send_allowed': False}
+
+    def response(self, extra=None, source='Claude Desktop session'):
+        rows = [{'name': self.title, 'ref': 'a4d29e', 'type': 'interactive', 'status': 'busy'}]
+        lines = ['  ' + self.title + ' [a4d29e]  ·  interactive  ·  busy  ·  ' + source + '  ·  started 1m ago']
+        if extra:
+            rows.append({'name': self.title, 'ref': 'b5e30f', 'type': 'interactive', 'status': 'idle'})
+            lines.append('  ' + self.title + ' [b5e30f]  ·  interactive  ·  idle  ·  ' + extra + '  ·  started 2m ago')
+        return {'listing': 'Peer sessions (' + str(len(rows)) + '):\n' + '\n'.join(lines),
+                'sections': [{'kind': 'sessions', 'total': len(rows), 'rows': rows}]}
+
+    def test_unique_desktop_requires_one_exact_row_and_source(self):
+        self.assertTrue(gate.unique_desktop_target(self.response(), self.title))
+        self.assertFalse(gate.unique_desktop_target(self.response(extra='Remote Control session'), self.title))
+        self.assertFalse(gate.unique_desktop_target(self.response(source='Remote Control session'), self.title))
+        offline = self.response()
+        offline['sections'][0]['rows'][0]['status'] = 'offline'
+        offline['listing'] = offline['listing'].replace('·  busy  ·', '·  offline  ·')
+        self.assertFalse(gate.unique_desktop_target(offline, self.title))
+        self.assertFalse(gate.unique_desktop_target({'listing': 'Claude Desktop session', 'sections': []}, self.title))
+        self.assertFalse(gate.unique_desktop_target({'listing': self.title, 'sections': self.response()['sections']}, self.title))
+
+    def test_send_requires_prior_list_result_and_exact_single_call(self):
+        session = 'fixture-cli-session'
+        send = {'hook_event_name': 'PreToolUse', 'tool_name': 'SendMessage',
+                'tool_input': {'to': self.title, 'message': self.body}, 'session_id': session}
+        _, allowed = gate.decide(dict(self.state), send)
+        self.assertFalse(allowed)
+        pre = {'hook_event_name': 'PreToolUse', 'tool_name': 'ListAgents',
+               'tool_input': {}, 'session_id': session}
+        post = {'hook_event_name': 'PostToolUse', 'tool_name': 'ListAgents',
+                'tool_response': self.response(), 'session_id': session}
+        state, allowed = gate.decide(dict(self.state), pre)
+        self.assertTrue(allowed)
+        state, allowed = gate.decide(state, post)
+        self.assertTrue(allowed)
+        changed = dict(send, tool_input={'to': self.title, 'message': self.body + ' altered'})
+        _, allowed = gate.decide(dict(state), changed)
+        self.assertFalse(allowed)
+        state, allowed = gate.decide(state, send)
+        self.assertTrue(allowed)
+        state, allowed = gate.decide(state, send)
+        self.assertFalse(allowed)
+        state, allowed = gate.decide(state, pre)
+        self.assertFalse(allowed)
+
+    def test_preflight_receipt_rejects_wrong_order_or_second_send(self):
+        calls = [
+            {'type': 'assistant', 'message': {'content': [{
+                'type': 'tool_use', 'id': 'l1', 'name': 'ListAgents', 'input': {}}]}},
+            {'type': 'assistant', 'message': {'content': [{
+                'type': 'tool_use', 'id': 's1', 'name': 'SendMessage',
+                'input': {'to': self.title, 'message': self.body}}]}},
+            {'type': 'user', 'message': {'content': [{
+                'type': 'tool_result', 'tool_use_id': 's1',
+                'content': '{"success":true,"msg_id":"m1"}'}]}}
+        ]
+        stream = '\n'.join(json.dumps(x) for x in calls)
+        self.assertEqual(courier.sendmessage_receipt(stream, self.title, self.body,
+                                                      preflight=True), ('m1', ''))
+        self.assertIsNone(courier.sendmessage_receipt('\n'.join(json.dumps(x) for x in calls[1:]),
+                                                       self.title, self.body, preflight=True)[0])
+        self.assertIsNone(courier.sendmessage_receipt(stream + '\n' + json.dumps(calls[1]),
+                                                       self.title, self.body, preflight=True)[0])
 
 
 
