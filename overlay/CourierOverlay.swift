@@ -40,6 +40,7 @@ private final class Overlay {
     private let fixture = ProcessInfo.processInfo.environment["COURIER_OVERLAY_FIXTURE"] == "1"
     private let visualProbe = ProcessInfo.processInfo.environment["COURIER_OVERLAY_VISUAL_PROBE"] == "1"
     private var rolloutSources: [String: DispatchSourceFileSystemObject] = [:]
+    private var rolloutTrackers: [String: RolloutTracker] = [:]
     private var rolloutActivity: [String: Double] = [:]
     private var iconRect = CGRect.zero
     private var clickTap: CFMachPort?
@@ -192,37 +193,13 @@ private final class Overlay {
         guard lock >= 0 else { return }
         defer { flock(lock, LOCK_UN); Darwin.close(lock) }
         flock(lock, LOCK_EX)
+        let tracker = rolloutTrackers[token] ?? RolloutTracker()
+        rolloutTrackers[token] = tracker
         guard let snapshot = try? JSONDecoder().decode(Snapshot.self, from: Data(contentsOf: stateURL)),
               let pair = snapshot.pairs.first(where: { $0.key == token }),
-              let handle = try? FileHandle(forReadingFrom: log) else { return }
-        defer { try? handle.close() }
-        let size = handle.seekToEndOfFile(); handle.seek(toFileOffset: size > 1_000_000 ? size-1_000_000 : 0)
-        let lines = String(decoding: handle.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n")
-        var user = "", reply = "", running = false, done = ""
-        for line in lines {
-            guard let row = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  let body = row["payload"] as? [String: Any] else { continue }
-            if row["type"] as? String == "event_msg" {
-                switch body["type"] as? String {
-                case "task_started": running = true; done = ""
-                case "task_complete", "turn_aborted": running = false; done = body["type"] as? String ?? ""
-                default: break
-                }
-            } else if row["type"] as? String == "response_item", body["type"] as? String == "message" {
-                let text = (body["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined()
-                if body["role"] as? String == "user" { user = text; reply = "" }
-                if body["role"] as? String == "assistant" { reply = text }
-            }
-        }
-        guard user.hasPrefix("【投递】\(pair.from_app)·\(pair.from) → \(pair.to_app)·\(pair.to)") else { return }
+              let state = tracker.read(log.path, senderApp: pair.from_app, sender: pair.from,
+                                       targetApp: pair.to_app, target: pair.to) else { return }
         rolloutActivity[token] = Date().timeIntervalSince1970
-        var state = pair.state
-        if running { state = pair.state == "sending" ? "delivered" : "working" }
-        else if done == "turn_aborted" { state = "error" }
-        else if done == "task_complete" {
-            let expected = "【回复】\(pair.to_app)·\(pair.to) → \(pair.from_app)·\(pair.from)"
-            state = reply.hasPrefix(expected) ? "replied" : reply.isEmpty ? "error" : "wrong_header"
-        }
         if state == pair.state { return }
         let changedAt = Date().timeIntervalSince1970
         let returning = ["replied", "error", "wrong_header", "stuck", "archived_target"].contains(state)
