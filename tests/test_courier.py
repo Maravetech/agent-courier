@@ -9,7 +9,7 @@ import unittest
 import importlib.util
 import glob
 import io
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -122,6 +122,46 @@ class CourierTest(unittest.TestCase):
         self.assertIn("回复抬头：✅", out)
         self.assertIn("收到", out)
 
+    def test_ui_runtime_error_reports_specific_safe_reason(self):
+        for command, args in [('ui-tab', []), ('ui-switch', ['00159 test target']),
+                              ('ui-send', ['--file', 'body.txt', '--session-id', TID,
+                                           '--expect-tab', '00159 test target'])]:
+            with self.subTest(command=command), \
+                 patch.object(courier, 'cmd_ui_tab', side_effect=RuntimeError('Codex UI 锁文件不安全')), \
+                 patch.object(courier, 'cmd_ui_switch', side_effect=RuntimeError('Codex UI 锁文件不安全')), \
+                 patch.object(courier, 'cmd_ui_send', side_effect=RuntimeError('Codex UI 锁文件不安全')), \
+                 patch.object(sys, 'argv', [SCRIPT, command, *args]), \
+                 redirect_stderr(io.StringIO()) as error:
+                with self.assertRaises(SystemExit) as result:
+                    courier.main()
+            self.assertEqual(result.exception.code, 2)
+            self.assertIn('Codex UI 锁文件不安全', error.getvalue())
+        with patch.object(courier, 'cmd_ui_tab', side_effect=TimeoutError('Codex UI 锁超时；持有者 pid=42 command=ui-tab')), \
+             patch.object(sys, 'argv', [SCRIPT, 'ui-tab']), redirect_stderr(io.StringIO()) as error:
+            with self.assertRaises(SystemExit) as result:
+                courier.main()
+        self.assertEqual(result.exception.code, 2)
+        self.assertIn('Codex UI 锁超时', error.getvalue())
+
+    def test_cua_driver_error_does_not_echo_private_output(self):
+        failed = SimpleNamespace(returncode=7, stdout='PRIVATE-BODY', stderr='PRIVATE-CREDENTIAL')
+        with patch.object(subprocess, 'run', return_value=failed):
+            with self.assertRaises(RuntimeError) as error:
+                courier.cua('list_apps', {})
+        self.assertIn('list_apps', str(error.exception))
+        self.assertIn('退出码 7', str(error.exception))
+        self.assertNotIn('PRIVATE-BODY', str(error.exception))
+        self.assertNotIn('PRIVATE-CREDENTIAL', str(error.exception))
+
+    def test_ui_tab_shows_homepage_reason_from_native_bridge(self):
+        args = SimpleNamespace(window_id=None)
+        with patch.object(courier, 'USE_NATIVE_AX', True), \
+             patch.object(courier, 'native_ui_action', return_value={
+                 'ok': False, 'reason': '当前在首页，没有打开会话'}), \
+             redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(courier.cmd_ui_tab.__wrapped__(args), 2)
+        self.assertIn('当前在首页，没有打开会话', output.getvalue())
+
     def test_wait_accepts_new_token_after_bootstrap_user_before_first_reply(self):
         path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
         rows = [msg('2026-01-02T00:00:00Z', 'user', 'bootstrap instructions'),
@@ -165,6 +205,36 @@ class CourierTest(unittest.TestCase):
              redirect_stdout(output):
             self.assertEqual(courier.cmd_ui_switch(args), 2)
         self.assertIn('Codex 在前台，用户可能正在使用；未切页', output.getvalue())
+
+    def test_frontmost_ignores_duplicate_chrome_active_entries(self):
+        chrome = {'name': 'Chrome', 'bundle_id': 'com.google.Chrome', 'active': True}
+        payload = json.dumps({'apps': [chrome, dict(chrome, pid=99)]})
+        with patch.object(courier, 'native_frontmost_bundle', return_value=None, create=True), \
+             patch.object(courier, 'cua', return_value=payload):
+            self.assertFalse(courier.codex_frontmost())
+
+    def test_frontmost_blocks_when_codex_is_active_even_with_other_processes(self):
+        apps = [{'name': 'Chrome', 'bundle_id': 'com.google.Chrome', 'active': True},
+                {'name': 'Codex', 'bundle_id': 'com.openai.codex', 'active': True}]
+        with patch.object(courier, 'native_frontmost_bundle', return_value=None, create=True), \
+             patch.object(courier, 'cua', return_value=json.dumps({'apps': apps})):
+            self.assertTrue(courier.codex_frontmost())
+
+    def test_frontmost_refuses_when_both_readers_have_no_bundle(self):
+        with patch.object(courier, 'native_frontmost_bundle', return_value=None, create=True), \
+             patch.object(courier, 'cua', return_value=json.dumps({'apps': [
+                 {'name': 'unknown', 'active': True}]})):
+            with self.assertRaisesRegex(RuntimeError, '均无法读取前台 App'):
+                courier.codex_frontmost()
+        with patch.object(courier, 'native_frontmost_bundle', return_value='com.openai.codex', create=True), \
+             patch.object(courier, 'cua', side_effect=AssertionError('native result should decide')):
+            self.assertTrue(courier.codex_frontmost())
+
+    def test_codex_target_excludes_web_chatgpt_process(self):
+        apps = [{'name': 'ChatGPT', 'bundle_id': 'com.google.Chrome', 'pid': 42, 'running': True}]
+        with patch.object(courier, 'cua', return_value=json.dumps({'apps': apps})):
+            with self.assertRaisesRegex(RuntimeError, 'Codex App 没在运行'):
+                courier.cua_target()
 
     def test_frontmost_codex_blocks_ui_send_before_ax_action(self):
         body = self.write('front-body.txt', '【投递】Claude Code·0007 → Codex·00159\n\nhello')
@@ -285,6 +355,42 @@ class CourierTest(unittest.TestCase):
         code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '1')
         self.assertEqual(code, 1, out)
         self.assertIn('其他用户消息', out)
+
+    def test_wait_ignores_structured_question_reply_but_not_new_request(self):
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        original = Path(path).read_text(encoding='utf-8')
+        marker = msg('2026-01-02T00:00:02.000Z', 'assistant', '【回复】Codex·00159 → Claude Code·0007\n收到')
+        control = '<send_user_message_question_reply>\n' + json.dumps([
+            {'questionItemId': 'q1', 'question': 'Proceed?', 'answer': 'Yes'}
+        ]) + '\n</send_user_message_question_reply>'
+        Path(path).write_text(original.replace(marker,
+            msg('2026-01-02T00:00:01.750Z', 'user', control) + '\n' + marker), encoding='utf-8')
+        code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '0')
+        self.assertEqual(code, 0, out)
+        self.assertIn('回复抬头：✅', out)
+
+        Path(path).write_text(original.replace(marker,
+            msg('2026-01-02T00:00:01.800Z', 'user',
+                '<environment_context>test</environment_context> new human request') + '\n' + marker),
+            encoding='utf-8')
+        code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '0')
+        self.assertEqual(code, 1, out)
+        # A human message containing the same tag is not a complete control envelope.
+        Path(path).write_text(original.replace(marker,
+            msg('2026-01-02T00:00:01.750Z', 'user', control + '\nnew request') + '\n' + marker), encoding='utf-8')
+        code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '0')
+        self.assertEqual(code, 1, out)
+        self.assertIn('其他用户消息', out)
+
+    def test_wait_ignores_codex_system_envelopes_after_delivery(self):
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        original = Path(path).read_text(encoding='utf-8')
+        marker = msg('2026-01-02T00:00:02.000Z', 'assistant', '【回复】Codex·00159 → Claude Code·0007\n收到')
+        extras = [msg('2026-01-02T00:00:01.700Z', 'user', '<environment_context>test</environment_context>'),
+                  msg('2026-01-02T00:00:01.800Z', 'user', '<external_codex_apps_open_page>test</external_codex_apps_open_page>')]
+        Path(path).write_text(original.replace(marker, '\n'.join(extras) + '\n' + marker), encoding='utf-8')
+        code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '0')
+        self.assertEqual(code, 0, out)
 
     def test_wait_accepts_initial_cli_new_delivery_after_auto_title(self):
         path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
@@ -819,6 +925,7 @@ class CourierTest(unittest.TestCase):
         def fake_cua(tool, _args):
             self.fail(f'unexpected cua call after target selection: {tool}')
         with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'prepare_ax_binary', return_value=None, create=True), \
              patch.object(courier, 'cua', side_effect=fake_cua), \
              patch.object(courier.subprocess if hasattr(courier, 'subprocess') else subprocess, 'run', return_value=fake) as run:
             result = courier.native_ui_action('tab')
@@ -827,6 +934,66 @@ class CourierTest(unittest.TestCase):
         self.assertIn('codex_ax.swift', command[1])
         self.assertEqual(command[4:6], ['42', '111'])
         self.assertEqual(len(command), 7)
+
+    def test_native_ax_uses_cached_binary_when_available(self):
+        fake = SimpleNamespace(returncode=0, stdout=json.dumps({'ok': True, 'tab': '00159 test target'}))
+        with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'prepare_ax_binary', return_value='/private/tmp/cached-ax', create=True), \
+             patch.object(subprocess, 'run', return_value=fake) as run:
+            self.assertEqual(courier.native_ui_action('tab')['tab'], '00159 test target')
+        self.assertEqual(run.call_args.args[0][0], '/private/tmp/cached-ax')
+
+    def test_ax_cache_recompiles_changed_or_tampered_binary(self):
+        source = Path(self.tmp.name, 'bridge.swift')
+        source.write_text('print("one")', encoding='utf-8')
+        calls = []
+        def compiler(command, **_kwargs):
+            calls.append(command)
+            Path(command[command.index('-o') + 1]).write_bytes(b'compiled-' + str(len(calls)).encode())
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+        with patch.object(courier, 'ax_cache_dir', return_value=str(Path(self.tmp.name, 'cache'))), \
+             patch.object(subprocess, 'run', side_effect=compiler):
+            first = courier.prepare_ax_binary(str(source))
+            self.assertEqual(courier.prepare_ax_binary(str(source)), first)
+            self.assertEqual(len(calls), 1)
+            Path(first).write_bytes(b'tampered')
+            self.assertEqual(courier.prepare_ax_binary(str(source)), first)
+            self.assertEqual(len(calls), 2)
+            source.write_text('print("two")', encoding='utf-8')
+            second = courier.prepare_ax_binary(str(source))
+            self.assertNotEqual(first, second)
+            self.assertEqual(len(calls), 3)
+            os.chmod(second, 0o777)
+            self.assertEqual(courier.prepare_ax_binary(str(source)), second)
+            self.assertEqual(len(calls), 4)
+            cache_dir = Path(second).parent
+            os.chmod(cache_dir, 0o777)
+            self.assertIsNone(courier.prepare_ax_binary(str(source)))
+            self.assertEqual(len(calls), 4)
+
+    def test_ax_cache_compile_failure_falls_back_to_interpreter(self):
+        source = Path(self.tmp.name, 'bridge.swift')
+        source.write_text('broken swift', encoding='utf-8')
+        failed = SimpleNamespace(returncode=1, stdout='', stderr='compile error')
+        with patch.object(courier, 'ax_cache_dir', return_value=str(Path(self.tmp.name, 'cache'))), \
+             patch.object(subprocess, 'run', return_value=failed):
+            self.assertIsNone(courier.prepare_ax_binary(str(source)))
+
+    def test_ax_cache_does_not_follow_binary_symlink(self):
+        source = Path(self.tmp.name, 'bridge.swift')
+        source.write_text('print("one")', encoding='utf-8')
+        def compiler(command, **_kwargs):
+            Path(command[command.index('-o') + 1]).write_bytes(b'compiled')
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+        with patch.object(courier, 'ax_cache_dir', return_value=str(Path(self.tmp.name, 'cache'))), \
+             patch.object(subprocess, 'run', side_effect=compiler):
+            binary = Path(courier.prepare_ax_binary(str(source)))
+            binary.unlink()
+            target = Path(self.tmp.name, 'target.txt')
+            target.write_text('untouched', encoding='utf-8')
+            binary.symlink_to(target)
+            self.assertEqual(Path(courier.prepare_ax_binary(str(source))), binary)
+            self.assertEqual(target.read_text(encoding='utf-8'), 'untouched')
 
     def test_native_ax_cold_start_primes_once_then_retries(self):
         calls = []
@@ -837,6 +1004,7 @@ class CourierTest(unittest.TestCase):
         runs = [SimpleNamespace(returncode=2, stdout=json.dumps({'ok': False, 'warmup_required': True})),
                 SimpleNamespace(returncode=0, stdout=json.dumps({'ok': True, 'tab': '00174 test'}))]
         with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'prepare_ax_binary', return_value=None, create=True), \
              patch.object(courier, 'cua', side_effect=fake_cua), \
              patch.object(subprocess, 'run', side_effect=runs) as run:
             self.assertEqual(courier.native_ui_action('tab')['tab'], '00174 test')
@@ -854,6 +1022,7 @@ class CourierTest(unittest.TestCase):
             {'ok': False, 'reason': 'App AXWindows 与屏上窗口无法唯一匹配',
              'warmup_required': True, 'warmup_stage': 'window'}))
         with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'prepare_ax_binary', return_value=None, create=True), \
              patch.object(courier, 'cua', side_effect=fake_cua), \
              patch.object(subprocess, 'run', side_effect=[missing, missing]) as run:
             result = courier.native_ui_action('tab')
@@ -869,6 +1038,7 @@ class CourierTest(unittest.TestCase):
              'warmup_required': True, 'warmup_stage': 'window'}))
         ready = SimpleNamespace(returncode=0, stdout=json.dumps({'ok': True, 'tab': '00159 test target'}))
         with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'prepare_ax_binary', return_value=None, create=True), \
              patch.object(courier, 'cua', side_effect=lambda tool, args: calls.append((tool, args)) or '{}'), \
              patch.object(subprocess, 'run', side_effect=[missing, ready]) as run:
             self.assertEqual(courier.native_ui_action('tab')['tab'], '00159 test target')
@@ -1032,6 +1202,7 @@ class CourierTest(unittest.TestCase):
 
 
 CID = "aaaaaaaa-1111-4222-8333-444444444444"
+AID = "bbbbbbbb-1111-4222-8333-444444444444"
 
 
 class ClaudeBackendTest(unittest.TestCase):
@@ -1040,11 +1211,18 @@ class ClaudeBackendTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         h = self.tmp.name
-        meta = os.path.join(h, "sessions", "acct", "org")
+        state_patch = patch.object(courier, 'LOGDIR', os.path.join(h, 'state'))
+        state_patch.start()
+        self.addCleanup(state_patch.stop)
+        meta = os.path.join(h, "sessions", AID, "org")
         os.makedirs(meta)
+        config = Path(h) / 'Library/Application Support/Claude/config.json'
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({'lastKnownAccountUuid': AID}))
         for i, (title, t) in enumerate([("0009 old title", 1), ("0009 review", 5)]):
             with open(os.path.join(meta, f"local_{i}.json"), "w") as f:
-                json.dump({"cliSessionId": CID, "title": title, "lastActivityAt": t}, f)
+                json.dump({"cliSessionId": CID, "sessionId": "local_" + CID,
+                           "title": title, "lastActivityAt": t}, f)
         proj = os.path.join(h, "claude", "projects", "-tmp-proj")
         os.makedirs(proj)
         rows = [
@@ -1127,38 +1305,11 @@ class ClaudeBackendTest(unittest.TestCase):
         self.assertEqual([line.split(' ', 1)[1] for line in out.strip().splitlines()][-2:],
                          ['开工', '完成'])
 
-    def test_claude_send_requires_exact_header_and_single_matching_receipt(self):
+    def test_claude_send_requires_exact_header_before_cli(self):
         body = '【投递】Codex·00159 → Claude Code·0009\n\nRT-X2C-fixture\n'
         body_path = Path(self.tmp.name) / 'out.txt'
         body_path.write_text(body, encoding='utf-8')
         args = SimpleNamespace(key=CID, file=str(body_path), new=False)
-        target = '0009 review'
-        def fake_run(argv, **kwargs):
-            self.assertEqual(argv[:2], ['claude', '-p'])
-            self.assertIn('--allowedTools', argv)
-            self.assertIn('--tools', argv)
-            prompt = argv[2]
-            payload = json.loads(prompt.split('\n', 1)[1])
-            self.assertEqual(payload, {'to': target, 'message': body})
-            stream = [
-                {'type': 'assistant', 'message': {'content': [
-                    {'type': 'tool_use', 'id': 'use-1', 'name': 'SendMessage',
-                     'input': {'to': target, 'message': body}}]}},
-                {'type': 'user', 'message': {'content': [
-                    {'type': 'tool_result', 'tool_use_id': 'use-1',
-                     'content': [{'type': 'text', 'text': '{"success":true,"msg_id":"receipt-1"}'}]}]}},
-            ]
-            return SimpleNamespace(returncode=0, stdout='\n'.join(json.dumps(x, ensure_ascii=False) for x in stream), stderr='')
-        output = io.StringIO()
-        with patch.object(courier, 'APP', 'claude'), \
-             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
-             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
-             patch.object(courier, 'claude_account_ready', return_value=(True, '')), \
-             patch.object(subprocess, 'run', side_effect=fake_run) as run, redirect_stdout(output):
-            self.assertEqual(courier.cmd_send_claude(args), 0)
-        run.assert_called_once()
-        self.assertIn('receipt-1', output.getvalue())
-        self.assertIn('verify', output.getvalue())
         body_path.write_text(body.replace('Claude Code·0009', 'Claude Code·0010'), encoding='utf-8')
         with patch.object(courier, 'APP', 'claude'), \
              patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
@@ -1166,9 +1317,174 @@ class ClaudeBackendTest(unittest.TestCase):
              patch.object(subprocess, 'run', side_effect=AssertionError('must not send')):
             self.assertEqual(courier.cmd_send_claude(args), 2)
 
+    def test_claude_send_uses_local_desktop_id_and_reports_acceptance(self):
+        body = '【投递】Codex·00159 → Claude Code·0009\n\nlocal-id-marker'
+        body_path = Path(self.tmp.name) / 'local-body.txt'
+        body_path.write_text(body, encoding='utf-8')
+        path = Path(self.env['CLAUDE_CONFIG_DIR']) / 'projects' / '-tmp-proj' / f'{CID}.jsonl'
+        args = SimpleNamespace(key=CID, file=str(body_path), new=False)
+        def fake_cli(argv, **_kwargs):
+            prompt = json.loads(argv[2].split('\n', 1)[1])
+            self.assertEqual(prompt['to'], 'local_' + CID)
+            self.assertEqual(prompt['message'], body)
+            stream = [
+                {'type': 'assistant', 'message': {'content': [
+                    {'type': 'tool_use', 'id': 'u1', 'name': 'SendMessage',
+                     'input': {'to': 'local_' + CID, 'message': body}}]}},
+                {'type': 'user', 'message': {'content': [
+                    {'type': 'tool_result', 'tool_use_id': 'u1',
+                     'content': json.dumps({'success': True,
+                         'message': "Forwarded to Claude Desktop's session messaging: sent."})}]}}
+            ]
+            with path.open('a', encoding='utf-8') as handle:
+                handle.write(json.dumps({'type': 'user', 'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                    'isMeta': True, 'turnOrigin': 'peer', 'message': {'role': 'user',
+                    'content': 'Another Claude session sent a message:\n'
+                               '<cross-session-message from="fixture">\n' + body +
+                               '\n</cross-session-message>'}}, ensure_ascii=False) + '\n')
+            return SimpleNamespace(returncode=0, stdout='\n'.join(json.dumps(x) for x in stream), stderr='')
+        with patch.object(courier, 'APP', 'claude'), \
+             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
+             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
+             patch.object(courier, 'claude_account_ready', return_value=(True, '')), \
+             patch.dict(os.environ, {'HOME': self.tmp.name}), \
+             patch.object(subprocess, 'run', side_effect=fake_cli) as run, redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(courier.cmd_send_claude(args), 0)
+        run.assert_called_once()
+        self.assertIn('已接受', output.getvalue())
+        self.assertIn('送达待 verify', output.getvalue())
+
+    def test_claude_send_to_running_session_is_accepted_before_log_delivery(self):
+        body = '【投递】Codex·00159 → Claude Code·0009\n\nqueued-marker'
+        body_path = Path(self.tmp.name) / 'queued-body.txt'
+        body_path.write_text(body, encoding='utf-8')
+        path = Path(self.env['CLAUDE_CONFIG_DIR']) / 'projects' / '-tmp-proj' / f'{CID}.jsonl'
+        with path.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'type': 'user', 'timestamp': '2026-01-03T00:00:01Z',
+                'message': {'role': 'user', 'content': 'current turn'}}) + '\n')
+        target = 'local_' + CID
+        stream = '\n'.join(json.dumps(x, ensure_ascii=False) for x in [
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'tool_use', 'id': 'u1', 'name': 'SendMessage',
+                 'input': {'to': target, 'message': body}}]}},
+            {'type': 'user', 'message': {'content': [
+                {'type': 'tool_result', 'tool_use_id': 'u1', 'content': json.dumps({
+                    'success': True,
+                    'message': "Forwarded to Claude Desktop's session messaging: queued."})}]}}
+        ])
+        with patch.object(courier, 'APP', 'claude'), \
+             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
+             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
+             patch.object(courier, 'claude_account_ready', return_value=(True, '')), \
+             patch.dict(os.environ, {'HOME': self.tmp.name}), \
+             patch.object(subprocess, 'run', return_value=SimpleNamespace(
+                 returncode=0, stdout=stream, stderr='')) as run, \
+             redirect_stdout(io.StringIO()) as output:
+            self.assertTrue(courier.claude_scan(str(path))[1])
+            self.assertEqual(courier.cmd_send_claude(SimpleNamespace(
+                key=CID, file=str(body_path), new=False)), 0)
+        run.assert_called_once()
+        self.assertIn('送达待 verify', output.getvalue())
+        code, _ = self.cli('verify', CID, '--text', 'queued-marker', '--timeout', '0')
+        self.assertEqual(code, 1)
+
+    def test_claude_send_honors_disconnected_pair_gate_before_cli(self):
+        body_path = Path(self.tmp.name) / 'gated-body.txt'
+        body_path.write_text('【投递】Codex·00159 → Claude Code·0009\n\nmarker', encoding='utf-8')
+        with patch.object(courier, 'APP', 'claude'), \
+             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
+             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
+             patch.object(courier, 'overlay_check', return_value=5) as check, \
+             patch.object(subprocess, 'run', side_effect=AssertionError('gate must stop CLI')):
+            self.assertEqual(courier.cmd_send_claude(SimpleNamespace(
+                key=CID, file=str(body_path), new=False)), 5)
+        check.assert_called_once_with('Codex·00159', 'Claude Code·0009')
+
+    def test_claude_send_refuses_name_only_address_even_if_local_index_unique(self):
+        body_path = Path(self.tmp.name) / 'local-body.txt'
+        body_path.write_text('【投递】Codex·00159 → Claude Code·0009\n\nmarker', encoding='utf-8')
+        args = SimpleNamespace(key='0009 review', file=str(body_path), new=False)
+        with patch.object(courier, 'APP', 'claude'), \
+             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
+             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
+             patch.object(subprocess, 'run', side_effect=AssertionError('no send by name')):
+            self.assertEqual(courier.cmd_send_claude(args), 2)
+
+    def test_claude_send_refuses_target_from_other_desktop_account(self):
+        body_path = Path(self.tmp.name) / 'local-body.txt'
+        body_path.write_text('【投递】Codex·00159 → Claude Code·0009\n\nmarker', encoding='utf-8')
+        other = 'cccccccc-1111-4222-8333-444444444444'
+        config = Path(self.tmp.name) / 'Library/Application Support/Claude/config.json'
+        config.write_text(json.dumps({'lastKnownAccountUuid': other}))
+        mirror = Path(self.tmp.name) / 'sessions' / other / 'org'
+        mirror.mkdir(parents=True)
+        (mirror / 'local_other.json').write_text(json.dumps({
+            'cliSessionId': CID, 'sessionId': 'local_' + other,
+            'title': '0009 review', 'lastActivityAt': 1}))
+        args = SimpleNamespace(key=CID, file=str(body_path), new=False)
+        with patch.object(courier, 'APP', 'claude'), \
+             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
+             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
+             patch.object(courier, 'claude_account_ready', return_value=(True, '')), \
+             patch.dict(os.environ, {'HOME': self.tmp.name}), \
+             patch.object(subprocess, 'run', side_effect=AssertionError('must not send')):
+            self.assertEqual(courier.cmd_send_claude(args), 2)
+
+    def test_desktop_receipt_rejects_named_agent_route(self):
+        to, body = 'local_' + CID, '【投递】Codex·00159 → Claude Code·0009\n\nmarker'
+        call = {'type': 'assistant', 'message': {'content': [
+            {'type': 'tool_use', 'id': 'u1', 'name': 'SendMessage',
+             'input': {'to': to, 'message': body}}]}}
+        result = {'type': 'user', 'message': {'content': [
+            {'type': 'tool_result', 'tool_use_id': 'u1',
+             'content': json.dumps({'success': True, 'msg_id': 'm1'})}]}}
+        stream = '\n'.join(json.dumps(x, ensure_ascii=False) for x in (call, result))
+        self.assertIsNone(courier.sendmessage_receipt(stream, to, body, desktop=True)[0])
+
+    def test_claude_send_does_not_call_old_log_entry_delivered(self):
+        body = '【投递】Codex·00159 → Claude Code·0009\n\nrepeat-marker'
+        body_path = Path(self.tmp.name) / 'repeat-body.txt'
+        body_path.write_text(body, encoding='utf-8')
+        path = Path(self.env['CLAUDE_CONFIG_DIR']) / 'projects' / '-tmp-proj' / f'{CID}.jsonl'
+        with path.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'type': 'user', 'timestamp': '2026-01-03T00:00:01Z',
+                'isMeta': True, 'turnOrigin': 'peer', 'message': {'role': 'user',
+                'content': 'Another Claude session sent a message:\n'
+                           '<cross-session-message from="fixture">\n' + body +
+                           '\n</cross-session-message>'}}, ensure_ascii=False) + '\n')
+            handle.write(json.dumps({'type': 'assistant', 'timestamp': '2026-01-03T00:00:02Z',
+                'message': {'role': 'assistant', 'stop_reason': 'end_turn',
+                            'content': [{'type': 'text', 'text': 'done'}]}}) + '\n')
+        target = 'local_' + CID
+        stream = '\n'.join(json.dumps(x, ensure_ascii=False) for x in [
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'tool_use', 'id': 'u1', 'name': 'SendMessage',
+                 'input': {'to': target, 'message': body}}]}},
+            {'type': 'user', 'message': {'content': [
+                {'type': 'tool_result', 'tool_use_id': 'u1', 'content': json.dumps({
+                    'success': True,
+                    'message': "Forwarded to Claude Desktop's session messaging: sent."})}]}}
+        ])
+        with patch.object(courier, 'APP', 'claude'), \
+             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
+             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
+             patch.object(courier, 'claude_account_ready', return_value=(True, '')), \
+             patch.dict(os.environ, {'HOME': self.tmp.name}), \
+             patch.object(subprocess, 'run', return_value=SimpleNamespace(
+                 returncode=0, stdout=stream, stderr='')) as run, \
+             redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(courier.cmd_send_claude(SimpleNamespace(
+                key=CID, file=str(body_path), new=False)), 0)
+        run.assert_called_once()
+        self.assertIn('送达待 verify', output.getvalue())
+        self.assertNotIn('Claude Desktop 送达', output.getvalue())
+        code, _ = self.cli('verify', CID, '--text', 'repeat-marker', '--since',
+                           time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), '--timeout', '0')
+        self.assertEqual(code, 1)
+
     def test_claude_account_gate_requires_live_login_and_matching_ids(self):
         desktop = Path(self.tmp.name) / 'Library/Application Support/Claude/config.json'
-        desktop.parent.mkdir(parents=True)
+        desktop.parent.mkdir(parents=True, exist_ok=True)
         desktop.write_text(json.dumps({'lastKnownAccountUuid': 'same'}))
         cli = Path(self.tmp.name) / '.claude.json'
         cli.write_text(json.dumps({'oauthAccount': {'accountUuid': 'same', 'emailAddress': 'x@example.test'}}))
@@ -1285,6 +1601,17 @@ class SwiftAXFixtureTest(unittest.TestCase):
                 'staticTexts': ['00174 courier AX 投递测试'], 'radios': [], 'areas': 1}
         self.assertEqual(self.fixture('ready', [cold, cold, warm])[1]['poll'], 2)
         self.assertEqual(self.fixture('ready', [cold, cold])[0], 2)
+
+    def test_homepage_reports_no_open_chat_without_relaxing_readiness(self):
+        home = {'window': 'ChatGPT', 'toolbars': 1,
+                'staticTexts': [], 'radios': [], 'areas': 1}
+        cold = dict(home, areas=0)
+        code, result = self.fixture('ready', [home])
+        self.assertEqual(code, 2)
+        self.assertEqual(result.get('reason'), '当前在首页，没有打开会话')
+        code, result = self.fixture('ready', [cold])
+        self.assertEqual(code, 2)
+        self.assertEqual(result.get('reason'), '聊天工具栏或输入框加载超时')
 
     def test_switch_accepts_delayed_title_only_after_matching_readback(self):
         old = {'window': '00159 投递courier', 'toolbars': 1,

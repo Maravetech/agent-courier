@@ -19,7 +19,7 @@
 | 前端主通道 | Claude Computer use（后台 `app_*` 工具） | Codex App 里的任意会话，包括新建会话 | 写入或点击前截一张 0.1 倍的小图 |
 | 前端备用通道 | Swift 原生 macOS AX 控件操作，配合 [cua-driver](https://github.com/trycua/cua) 发现屏上窗口 ID，再按 ID 绑定 AX 窗口（`ui-*` 命令） | 同上 | 不截图 |
 | 命令行兜底 | `codex exec` | 新建会话，以及 App 从没加载过的会话 | 不截图 |
-| Claude 会话发送 | `claude -p` 调用一次 `SendMessage` | 已有、编号唯一的 Claude Code 会话 | 不截图 |
+| Claude 会话发送 | `claude -p` 调用一次 `SendMessage` | 按完整 CLI 会话 ID 指向已有的本机 Claude Desktop 会话 | 不截图 |
 
 ## 安全设计
 
@@ -84,11 +84,15 @@ python3 -I $C watch <ID>             # 持续输出开工、完成、中止、�
 
 `ui-send` 只用于索引中已有的会话；新建会话用 Computer use 或 `send --new`。`find`、`status`、`verify`、`wait`、`watch` 按会话 ID 汇总所有 rollout 分段，按事件时间读取，包含文件名带 `_分段ID` 后缀的记录。`wait` 以匹配到的投递消息为锚，即使回合已结束也能返回；中止或抬头不符会返回非零。离线测试不代表真实 Codex 界面已经送达。
 
-**Codex → Claude Code：**先用 `--app claude find <编号或完整标题>` 找唯一会话，并用 `status <ID> -n 0` 确认空闲；再用 `--app claude compose --from-agent Codex --from-session <五位编号> --to <Claude ID> --file body.txt --out msg.txt`，执行 `--app claude send <Claude ID> --file msg.txt`，最后依次 `--app claude verify <ID> --text <唯一标识>`、`--app claude wait <ID> --text <唯一标识>`。Claude CLI 必须已登录且与桌面 App 账号一致，否则拒发。工具调用必须仅一次、目标完整标题和正文逐字一致，结果须有 `success:true` 与 `msg_id`。Claude 回复的首行须是 `【回复】Claude Code·NNNN → Codex·NNNNN`，并用 courier 投回发起的 Codex 会话；完整往返见 [SKILL.md](skills/courier/SKILL.md)。
+**Codex → Claude Code：**先用 `--app claude find <编号或完整标题>` 找到完整 CLI 会话 ID，用 `status <ID> -n 0` 查看状态；再用 `--app claude compose --from-agent Codex --from-session <五位编号> --to <Claude ID> --file body.txt --out msg.txt`，执行 `--app claude send <完整 Claude CLI 会话 ID> --file msg.txt`，最后依次 `--app claude verify <ID> --text <唯一标识>`、`--app claude wait <ID> --text <唯一标识>`。本地与远程会话可能重名，所以发送不接受编号或标题作地址。Claude CLI 必须已登录且与桌面 App 账号一致，目标元数据还必须归属当前桌面账号。目标正在运行也可以发送，消息可能排队到它下一次调用工具时。只允许一次 `SendMessage`，核对收件地址和正文逐字一致、本地桌面路由回执成功；返回 0 只代表已接受，`verify` 读回目标本地记录才证明送达，`wait` 再核对回复。桌面直送回执没有 `msg_id`。Claude 回复首行须是 `【回复】Claude Code·NNNN → Codex·NNNNN`，并用 courier 投回发起的 Codex 会话；完整往返见 [SKILL.md](skills/courier/SKILL.md)。
+
+投递对象只认桌面 App：Codex 按 `com.openai.codex` 绑定原生窗口，Claude 只指向本机 Claude Desktop 会话。浏览器扩展、网页版 ChatGPT/Codex、远程或云端会话都不作投递目标。DSH 由 CrossLab 的 `codex-relay` / `claude-relay` 按编号投进 DSH App 会话，不走 courier。
 
 新会话用 `locate` 取得 ID 后，先运行 `wait-number <ID> --timeout 90`，等标题出现唯一的五位编号；超时返回「编号未就绪」。首条 `Codex·新建` 投递前即使有引导用的用户消息，只要此前没有带抬头的投递或助手回复，`wait` 仍接受新建令牌。
 
 `ui-switch` 和 `ui-send` 默认等 Codex 离开前台最多 30 秒，可用 `--front-timeout <秒>` 调整。Codex 始终在前台时不切页、不写入；原生桥接在 AX 操作前再次核对。切页途中 Codex 转到前台就中止，并尽力恢复原标签页；恢复无法确认时明确报出。
+
+前台判断优先读 macOS `NSWorkspace.frontmostApplication`。Chrome 等其他 App 即使有多个进程同时标成 active，也不会因此阻断后台 Codex 投递；确认 Codex App 在前台时仍等待或拒发。
 
 `ui-send` 写入后若未能点发送，只在原窗口、原标签页和输入框仍是本次写入全文时清空并报告「已还原」。若标签或内容变化，报告「未还原」，必须先在 App 核对再重试；不会清掉别人的新草稿。发送按钮与当前标签页都从绑定的原生 AX 窗口核对。
 
@@ -103,6 +107,12 @@ Codex 闲置后若暂时读不到匹配的 `AXWindows`，桥接先做一次只�
 2026-11-05 已在隔离测试会话实发单行、多行，各自通过 `verify`、`wait`，前台 App 保持不变。空输入框的 AXValue 占位提示带一个换行；失败还原时写入空字符串，再核对发送按钮消失，不能把占位提示当成草稿写回。
 
 `ui-tab`、`ui-switch`、`ui-send` 共用 `$COURIER_STATE_DIR` 下的跨进程 Codex 界面锁，避免多个进程同时操作同一个 Codex 窗口。锁记录持有者 PID 与命令，进程退出即释放；默认 10 秒超时，可用 `--lock-timeout <秒>` 调整。只有使用同一状态目录的本版 courier 进程会遵守该锁；直接调用 cua-driver 或仍用旧插件的 Agent 不受约束。发送前还会核对抬头收件编号与当前标签页编号。
+
+原生 AX 桥接首次用 `swiftc` 编译，二进制缓存在 `~/Library/Caches/agent-courier`，后续 `ui-*` 命令复用。缓存文件名含 Swift 源码 SHA-256；复用前检查私有目录、仅本人可读写执行的权限以及二进制校验清单。源码或缓存被改动时重编；编译或缓存不可用时退回解释执行，不运行未通过校验的旧二进制。
+
+停在「新聊天」首页时，如果输入框已加载但没有打开会话，`ui-tab` 会拒绝并提示「当前在首页，没有打开会话」。输入框尚未加载的冷启动仍提示加载超时。`ui-*` 异常现在显示具体的安全原因（例如界面锁超时及持有者 PID）；CuaDriver 的原始输出可能带窗口私密文字，因此不会原样打印。
+
+`wait` 会忽略完整、结构化的 Codex 问答控制封套（如 `<send_user_message_question_reply>`）和环境、外部上下文注入；投递后的普通用户新消息仍判为 `interleaved`。rollout 没有能区分「人工消息完整仿造控制封套」的独立来源标记，因此这一极少见情形无法仅靠记录辨别。
 
 ## 环境要求
 

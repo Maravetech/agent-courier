@@ -35,7 +35,7 @@ First time? Go through [`PREREQUISITES.md`](PREREQUISITES.md) and run its self-c
 | `overlay list [--json]` | Read the same session pairs shown by the panel | 0 listed |
 | `ui-tab` / `ui-switch <exact title>` / `ui-send --file <body> --session-id <ID> --expect-tab <exact title>` | Fallback front end for an existing session; use `--window-id <ID>` on each command when multiple Codex windows are on screen | `ui-send`: 0 clicked / 2 refused / 1 no send button |
 | `--app claude <find\|status\|verify\|wait\|watch\|locate\|compose>` | Claude desktop session records (`~/.claude/projects`) | as above |
-| `--app claude send <ID, four-digit number, or exact title> --file <body>` | Send one headed Codex message to a uniquely named Claude Code session through one `claude -p` / `SendMessage` call | 0 accepted / 2 refused / 5 CLI or receipt failure |
+| `--app claude send <full local CLI session ID> --file <body>` | Address one Claude Desktop session by its account-scoped `local_…` ID through one `claude -p` / `SendMessage` call; a running target may queue the message | 0 accepted, then verify / 2 refused / 5 uncertain |
 | `send <ID> --file <body>` or `send --new --file <body>` | CLI fallback via `codex exec` | 0 submitted / 4 session held by the app |
 
 Session numbers can repeat. **Always act on the session ID.**
@@ -59,6 +59,7 @@ Every reply must start with the reverse:
 - Generate with `compose`. Never write the header by hand. `compose` also appends the reply requirement.
 - `send` and `ui-send` refuse a body without a header (exit 2).
 - `wait` returns nonzero on an aborted turn, missing reply, or wrong reply header. Stop and resolve the mismatch before continuing.
+- Codex's structured answer to an async user question and its environment/external context injections do not count as a new user turn for `wait`; an ordinary new message still does.
 - The receiver number comes from the leading digits of the session title, otherwise the first 8 characters of the ID. A new session's first delivery can use `Codex·新建`; after `locate`, run `wait-number <ID>` and use the assigned number for later deliveries. `wait` accepts `新建` only for the first headed delivery before any assistant reply, even if a bootstrap user message precedes it.
 
 ## Pick a channel
@@ -76,7 +77,7 @@ Why the CLI can't be primary: while the Codex app runs, it holds the write lock 
 | Step | Action | Pass when |
 | --- | --- | --- |
 | 1 Locate | `find` → ID | Exactly one |
-| 2 Idle check | `status <ID> -n 1` | `回合：空闲` (idle). If running, `wait` first. Don't interrupt |
+| 2 State check | `status <ID> -n 1` | For Codex UI sending, wait until idle. Claude Desktop `SendMessage` accepts a running target and may queue delivery |
 | 3 Mark time | `date -u +%Y-%m-%dT%H:%M:%SZ` → SINCE | — |
 | 4 Compose | `compose … --out body.txt` | Exit 0 |
 | 5 Send | Front end (below) or `send` | — |
@@ -89,13 +90,15 @@ A delivery is complete only when the **originating session** receives the reply 
 
 ### Codex → Claude Code round trip
 
-1. `--app claude find <four-digit number or exact title>` and `status <ID> -n 0`: require one numbered, idle Claude session. The send command repeats these checks.
+1. `--app claude find <four-digit number or exact title>` and `status <ID> -n 0`: find the full CLI session ID of one numbered local Claude Desktop session and inspect its state. Send requires that full ID; a number or title alone is refused because remote and local sessions can share names. A running target is allowed; the message may queue until its next tool call.
 2. `--app claude compose --from-agent Codex --from-session <five-digit Codex number> --to <Claude ID> --file body.txt --out msg.txt`. Use a unique marker in the body.
-3. `--app claude send <Claude ID> --file msg.txt`. It checks the Claude CLI login and the current desktop/CLI account IDs without printing credentials. It sends with `claude -p`, only `SendMessage` available, and requires one tool call with the exact `to` and `message`, plus `success:true` and `msg_id`. A CLI error or uncertain receipt is nonzero; check `verify` before any retry.
+3. `--app claude send <Claude ID> --file msg.txt`. It checks the CLI login, desktop/CLI account IDs, the target metadata under the current desktop account, and the disconnected-pair gate without printing credentials. It passes the metadata's `local_…` session ID to one `SendMessage` call and checks the exact `to` and `message` plus the Claude Desktop route receipt. The direct desktop route has no `msg_id`; exit 0 means accepted, not delivered. A CLI error or uncertain receipt is nonzero. Do not retry before `verify`.
 4. `--app claude verify <Claude ID> --text <unique marker> --since <SINCE>`, then `--app claude wait <Claude ID> --text <unique marker>`. Claude's SendMessage inbox appears as a peer user record; the helper unwraps it for these checks. A successful `wait` requires `【回复】Claude Code·NNNN → Codex·NNNNN` as the first line of Claude's final reply.
 5. For an explicit return delivery, Claude uses `compose` to wrap its reply in a new `【投递】Claude Code·NNNN → Codex·NNNNN` message and sends it with courier's Codex front end. The originating Codex session checks `verify` for that return message; if it answers, Claude can `wait` on that new delivery. A bare `【回复】` cannot be passed to `ui-send`, which requires a delivery header. The initial `--app claude wait` already lets the Codex sender read Claude's answer directly from Claude's record.
 
 The CLI process is a model intermediary: the helper checks its tool arguments after the call, so a malformed call may already have run. It never retries automatically. Use the destination log readback to confirm the actual delivery.
+
+Destinations are desktop Apps only: Codex binds `com.openai.codex` and its native window; Claude send resolves a local Claude Desktop session. Browser extensions, web ChatGPT/Codex, and remote or cloud Claude sessions are not delivery targets. DSH delivery uses CrossLab's `codex-relay` / `claude-relay`, addressed to a DSH App session; courier does not send to DSH.
 
 ### Front end with Computer use
 
@@ -111,15 +114,21 @@ The CLI process is a model intermediary: the helper checks its tool arguments af
 
 `ui-switch` and `ui-send` wait up to 30 seconds for Codex to leave the foreground; `--front-timeout <seconds>` changes the limit. If Codex stays in front, they refuse without switching or writing. The bridge checks again immediately before pressing or writing, and stops if Codex becomes frontmost during a switch; it attempts to return to the original tab when the tab and input remain safe to identify.
 
+The foreground guard reads `NSWorkspace.frontmostApplication` first. If that read fails, it checks whether any active cua-driver process has Codex's exact bundle ID. Multiple active processes of another App do not block delivery; a known frontmost Codex App does.
+
 `ui-switch "<exact title>"` → `ui-send --file body.txt --session-id <ID> --expect-tab "<exact title>"`. The helper addresses existing indexed sessions only. It gets the visible window ID from cua-driver and checks its owner PID and on-screen state directly with `CGWindowListCopyWindowInfo`. The Swift bridge resolves the ID of each native `AXWindows` element through a runtime-loaded private macOS Accessibility symbol and requires exactly one match. If that symbol is unavailable, it falls back to comparing the fresh WindowServer bounds with AX position and size; multiple matches refuse. If no AX window matches after an idle period, one read-only filtered CuaDriver window snapshot wakes accessibility before a single binding retry; no match on retry refuses. Every control is found inside the matched window. Unmatched windows, missing or conflicting current titles, and ambiguous composer or Send controls cause refusal. Codex 26.1029 reads the current title from Chat toolbar static text and cross-checks the AXWindow title; older AXRadioButton layouts remain supported. Duplicate exact-title sidebar buttons within the bound window are allowed, with a 3-second post-click title poll. If the target is absent and the unique Recent section is collapsed, `ui-switch` expands it, finds the target, switches, then collapses it and rechecks the target title before reporting success. If the section cannot be restored, switching returns nonzero and the caller must not send. A ready composer with no target button reports `目标会话按钮不存在（侧栏分区可能折叠）`, separate from a loading timeout. It never uses the ambiguous cua-driver AX tree for control selection and never AXPresses the input field. At cold start it tries AXManualAccessibility, polls for content, and if needed takes one filtered, read-only CuaDriver snapshot to wake Electron accessibility before retrying native AX. `ui-tab`, `ui-switch`, and `ui-send` share a cross-process UI lock.
 
 The native bridge is `scripts/codex_ax.swift`, using only macOS AppKit and ApplicationServices. It reads the body from stdin, writes with `AXValue`, checks the full multiline value and current tab, then AXPresses the unique Send button. If failure occurs after writing but before a successful press, it clears only its own unchanged composer in the same tab and reports `已还原`. An empty composer may expose a placeholder plus newline as AXValue; clearing uses an empty string and checks that Send disappears. If the target or draft changed, `未还原` requires manual inspection. Verify every delivery and reply from rollout records.
+
+The first `ui-*` call compiles the bridge with `swiftc` into a private, source-hashed cache under `~/Library/Caches/agent-courier`; later calls reuse it after file mode and checksum checks. If compilation or cache validation cannot complete, the command interprets the Swift source. This avoids repeated Swift compiler memory peaks while preserving a source fallback.
+
+If `ui-tab` reports `当前在首页，没有打开会话`, the new-chat home is loaded and no session is selected; open the intended session through an authorized front end before sending. A cold-start loading timeout is a separate refusal. `ui-*` errors include a specific safe reason, while raw CuaDriver diagnostics remain hidden because they may contain window text.
 
 ### Loop rules (mandatory)
 
 - Act on and reply to a message only when it starts with `【投递】`. **A `【回复】` never triggers an automatic reply**: it goes back to the original sender, who decides the next step.
 - At most 5 deliveries per task and per session pair. Stop after two rounds with no progress.
-- Never deliver into a session that is running a turn (`status` not idle). Wait for it to return to idle.
+- For Codex UI delivery, never write into a session running a turn (`status` not idle). Claude Desktop `SendMessage` can address a running Claude session; use `verify` and `wait` to observe queued delivery and its reply.
 - One writer per app at a time: finish switch, write and send before anyone else touches the same window. `ui-send` checks the tab and the draft every time.
 - Anything about money, credentials, changing rules or guardrails, live services, or irreversible actions: stop both sides and ask the user.
 

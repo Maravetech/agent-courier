@@ -5,6 +5,16 @@ import AppKit
 import Darwin
 import Foundation
 
+// The foreground guard needs only the owning desktop App's bundle ID. It
+// runs before window discovery, so it cannot depend on a visible Codex tab.
+if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "frontmost" {
+    let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+    let result: [String: Any] = ["ok": bundle != nil, "bundle_id": bundle ?? ""]
+    let data = try! JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+    print(String(data: data, encoding: .utf8)!)
+    exit(bundle == nil ? 2 : 0)
+}
+
 // Pure decisions are also exercised by the offline fixture mode below.
 func resolvedTitle(_ window: String, _ toolbars: Int, _ staticTexts: [String], _ radios: [String]) -> String? {
     guard !window.isEmpty, window != "ChatGPT" else { return nil }
@@ -18,6 +28,12 @@ func fixtureModel(_ raw: [String: Any]) -> (String?, Int, Int) {
     let title = resolvedTitle(raw["window"] as? String ?? "", raw["toolbars"] as? Int ?? 0,
                               raw["staticTexts"] as? [String] ?? [], raw["radios"] as? [String] ?? [])
     return (title, raw["areas"] as? Int ?? 0, raw["targets"] as? Int ?? 0)
+}
+func readinessFailure(_ windowTitle: String, _ areaCount: Int) -> String {
+    // A loaded new-chat home has a composer but no conversation title.
+    // A cold start has no composer yet and still needs the warmup timeout.
+    return windowTitle == "ChatGPT" && areaCount == 1
+        ? "当前在首页，没有打开会话" : "聊天工具栏或输入框加载超时"
 }
 func sidebarDecision(_ targets: Int, _ recentCount: Int, _ recentExpanded: Bool?) -> String {
     if targets > 0 { return "target" }
@@ -50,6 +66,10 @@ if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "fixture" {
                 answer = ["ok": true, "tab": title!, "poll": index]
                 break
             }
+        }
+        if answer["ok"] as? Bool != true, let last = rows.last {
+            answer["reason"] = readinessFailure(last["window"] as? String ?? "",
+                                                last["areas"] as? Int ?? 0)
         }
     } else if mode == "button", let row = rows.first {
         if fixtureModel(row).2 >= 1 { answer = ["ok": true, "button_index": 0] }
@@ -260,7 +280,9 @@ while !ready(initial) && Date() < deadline {
     initial = snapshot()
 }
 guard ready(initial) else {
-    emit(["ok": false, "reason": "聊天工具栏或输入框加载超时", "warmup_required": true], 2)
+    emit(["ok": false,
+          "reason": readinessFailure(string(window, kAXTitleAttribute), initial.areas.count),
+          "warmup_required": true], 2)
 }
 if action == "tab" {
     guard let current = tab(initial) else { refuse("标签页不唯一") }
