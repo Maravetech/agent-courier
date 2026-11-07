@@ -2,14 +2,25 @@
 set -eu
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 app="${COURIER_BUILD_APP:-$here/build/courier-overlay.app}"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+panel="$app/Contents/Helpers/CourierPanel.app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$panel/Contents/MacOS"
 rm -f "$app"/Contents/Resources/bird-*.png "$app"/Contents/Resources/bird-*.svg "$app/Contents/Resources/SkyLightBridge.o"
 clang -O2 -fobjc-arc -c "$here/CAWindowBridge.m" -o "$app/Contents/Resources/CAWindowBridge.o"
-swiftc -O -framework Foundation -framework ApplicationServices -framework CoreGraphics -framework QuartzCore \
+swiftc -O -framework Foundation -framework ApplicationServices -framework CoreGraphics -framework QuartzCore -framework ServiceManagement \
   "$here/CodeBirdArt.swift" "$here/CABirdNode.swift" "$here/CAParticles.swift" "$here/PairPalette.swift" "$here/CAOverlayRenderer.swift" \
-  "$here/PairDirectory.swift" "$here/RolloutState.swift" "$here/SidebarLocator.swift" "$here/CourierOverlay.swift" "$app/Contents/Resources/CAWindowBridge.o" \
+  "$here/PairDirectory.swift" "$here/RolloutState.swift" "$here/SidebarLocator.swift" "$here/MenuClickTap.swift" "$here/CourierOverlay.swift" "$app/Contents/Resources/CAWindowBridge.o" \
   -o "$app/Contents/MacOS/courier-overlay"
-swiftc -O -parse-as-library -framework AppKit "$here/PairDirectory.swift" "$here/PairPalette.swift" "$here/CourierPanel.swift" -o "$app/Contents/MacOS/courier-panel"
+swiftc -O -parse-as-library -framework AppKit "$here/PairDirectory.swift" "$here/PairPalette.swift" "$here/CourierPanel.swift" -o "$panel/Contents/MacOS/courier-panel"
+cat > "$panel/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>tech.marave.courier-panel</string>
+<key>CFBundleName</key><string>Courier Panel</string>
+<key>CFBundleExecutable</key><string>courier-panel</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+PLIST
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

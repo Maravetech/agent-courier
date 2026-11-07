@@ -26,6 +26,35 @@ enum OverlayPreference {
     }
 }
 
+enum CodexIndex {
+    struct Entry { let id: String?; let title: String }
+
+    static func read(_ home: URL, numbers: Set<String>) -> (entries: [String: Entry], complete: Bool) {
+        guard !numbers.isEmpty, let file = fopen(home.appendingPathComponent("session_index.jsonl").path, "r")
+        else { return ([:], false) }
+        var buffer: UnsafeMutablePointer<CChar>?, capacity = 0
+        defer { free(buffer); fclose(file) }
+
+        var entries: [String: Entry] = [:]
+        var complete = true
+        while true {
+            let length = getline(&buffer, &capacity, file)
+            guard length > 0, let buffer else { break }
+            if length == 1, buffer[0] == 10 { continue }
+            autoreleasepool {
+                let data = Data(bytesNoCopy: buffer, count: length, deallocator: .none)
+                guard let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let title = row["thread_name"] as? String, !title.isEmpty else { complete = false; return }
+                let number = String(title.prefix(5))
+                if numbers.contains(number), title.hasPrefix(number + " ") {
+                    entries[number] = Entry(id: row["id"] as? String, title: String(title.dropFirst(6)))
+                }
+            }
+        }
+        return (entries, complete && feof(file) != 0 && ferror(file) == 0)
+    }
+}
+
 struct DirectoryPair: Codable {
     let from_app: String, to_app: String, from: String, to: String, state: String
     let updated_at: Double
@@ -47,38 +76,40 @@ struct PairDirectory: Codable {
             let env = ProcessInfo.processInfo.environment
             let codex = URL(fileURLWithPath: ((env["CODEX_HOME"] ?? "~/.codex") as NSString).expandingTildeInPath)
             let claude = URL(fileURLWithPath: ((env["COURIER_CLAUDE_SESSIONS"] ?? "~/Library/Application Support/Claude/claude-code-sessions") as NSString).expandingTildeInPath)
+            let data = (try? Data(contentsOf: url)) ?? Data()
+            let pairs = ((try? JSONDecoder().decode(Snapshot.self, from: data))?.pairs ?? []).sorted { $0.updated_at > $1.updated_at }
+            var requested: [String: Set<String>] = [:]
+            for pair in pairs {
+                requested[pair.from_app, default: []].insert(pair.from)
+                requested[pair.to_app, default: []].insert(pair.to)
+            }
             var catalogs: [String: [String: Session]] = [:], complete: [String: Bool] = [:]
-            var codes: [String: Session] = [:], ids: [String: String] = [:]
-            if let text = try? String(contentsOf: codex.appendingPathComponent("session_index.jsonl"), encoding: .utf8) {
-                complete["Codex"] = true
-                for line in text.split(separator: "\n") {
-                    guard let row = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                          let title = row["thread_name"] as? String, !title.isEmpty else { complete["Codex"] = false; continue }
-                    let number = String(title.prefix(5))
-                    if number.count == 5, number.allSatisfy(\.isNumber), title.hasPrefix(number + " ") {
-                        codes[number] = Session(title: String(title.dropFirst(6)), archived: false)
-                        ids[number] = row["id"] as? String
-                    }
-                }
+            let index = CodexIndex.read(codex, numbers: requested["Codex"] ?? [])
+            complete["Codex"] = index.complete
+            var codes = index.entries.mapValues { Session(title: $0.title, archived: false) }
+            if !codes.isEmpty {
                 var db: OpaquePointer?
                 if sqlite3_open_v2(codex.appendingPathComponent("state_5.sqlite").path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db {
-                    for (number, id) in ids {
-                        var statement: OpaquePointer?
-                        if sqlite3_prepare_v2(db, "SELECT archived FROM threads WHERE id=?", -1, &statement, nil) == SQLITE_OK {
+                    var statement: OpaquePointer?
+                    if sqlite3_prepare_v2(db, "SELECT archived FROM threads WHERE id=?", -1, &statement, nil) == SQLITE_OK {
+                        for (number, entry) in index.entries {
+                            guard let id = entry.id else { continue }
                             _ = id.withCString { sqlite3_bind_text(statement, 1, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
-                            if sqlite3_step(statement) == SQLITE_ROW, let entry = codes[number] {
+                            if sqlite3_step(statement) == SQLITE_ROW {
                                 codes[number] = Session(title: entry.title, archived: sqlite3_column_int(statement, 0) != 0)
                             }
+                            sqlite3_reset(statement)
                         }
-                        sqlite3_finalize(statement)
                     }
+                    sqlite3_finalize(statement)
                 }
                 if let db { sqlite3_close(db) }
             }
             catalogs["Codex"] = codes
             var claudes: [String: Session] = [:]
             var directoryError = false
-            if let files = FileManager.default.enumerator(at: claude, includingPropertiesForKeys: nil, errorHandler: { _, _ in directoryError = true; return true }) {
+            if let wanted = requested["Claude Code"],
+               let files = FileManager.default.enumerator(at: claude, includingPropertiesForKeys: nil, errorHandler: { _, _ in directoryError = true; return true }) {
                 complete["Claude Code"] = true
                 for case let file as URL in files where file.lastPathComponent.hasPrefix("local_") && file.pathExtension == "json" {
                     autoreleasepool {
@@ -86,7 +117,7 @@ struct PairDirectory: Codable {
                               let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                               let title = row["title"] as? String, !title.isEmpty else { complete["Claude Code"] = false; return }
                         let number = String(title.prefix(4))
-                        guard number.count == 4, number.allSatisfy(\.isNumber), title.hasPrefix(number + " ") else { return }
+                        guard wanted.contains(number), title.hasPrefix(number + " ") else { return }
                         let archived = row["isArchived"] as? Bool ?? false
                         let old = claudes[number]
                         claudes[number] = Session(title: String(title.dropFirst(5)), archived: archived && (old?.archived ?? true))
@@ -95,8 +126,6 @@ struct PairDirectory: Codable {
                 if directoryError { complete["Claude Code"] = false }
             }
             catalogs["Claude Code"] = claudes
-            let data = (try? Data(contentsOf: url)) ?? Data()
-            let pairs = ((try? JSONDecoder().decode(Snapshot.self, from: data))?.pairs ?? []).sorted { $0.updated_at > $1.updated_at }
             let links = (try? Data(contentsOf: url.deletingLastPathComponent().appendingPathComponent("links.json"))) ?? Data()
             let off = Set(((try? JSONDecoder().decode([String: [String]].self, from: links))?["disconnected"] ?? []))
             func reason(_ app: String, _ number: String) -> String {
