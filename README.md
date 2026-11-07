@@ -105,6 +105,8 @@ The first real delivery was verified in an isolated Codex test session on 2026-1
 
 The native AX bridge is compiled once with `swiftc` into `~/Library/Caches/agent-courier` and reused by `ui-*` commands. The cache name includes the Swift source SHA-256; a private directory, owner-only file modes, and a binary checksum manifest are checked before reuse. A changed or untrusted cache entry is recompiled, and a compiler/cache failure falls back to interpreting the Swift source. No cached binary is used after a failed integrity check.
 
+On the new-chat home, `ui-tab` refuses with `当前在首页，没有打开会话` when the composer has loaded but no conversation is open. Cold starts without a composer still report a loading timeout. UI exceptions now include their specific safe reason (for example, a lock timeout and holder PID); raw CuaDriver output is hidden because it may contain private window text.
+
 `wait` ignores complete, structured Codex question-answer control envelopes such as `<send_user_message_question_reply>`, as well as Codex environment/external context injections. A new ordinary user message after the delivery still makes the turn `interleaved`. The rollout does not provide a distinct provenance marker for a human message that exactly imitates a control envelope, so this filtering cannot distinguish that rare case.
 
 ## Requirements

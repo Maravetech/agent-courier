@@ -1109,7 +1109,9 @@ def cua(tool, args):
     r = subprocess.run(["cua-driver", "call", tool, json.dumps(args, ensure_ascii=False)],
                        capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
-        raise RuntimeError(f"cua-driver {tool} 失败：{(r.stderr or r.stdout).strip()[:200]}")
+        # Driver diagnostics can include window text or other private content.
+        # Keep the failed operation and exit status, never echo raw output.
+        raise RuntimeError(f"cua-driver {tool} 失败（退出码 {r.returncode}；驱动输出已隐藏）")
     return r.stdout
 
 
@@ -1658,9 +1660,9 @@ def main():
         sys.exit(2)
     try:
         sys.exit(a.fn(a))
-    except RuntimeError:
+    except (RuntimeError, TimeoutError) as error:
         if a.cmd.startswith("ui-"):
-            print("拒绝界面操作：窗口归属或界面状态无法确认", file=sys.stderr)
+            print(f"拒绝界面操作：{error}", file=sys.stderr)
             sys.exit(2)
         raise
 

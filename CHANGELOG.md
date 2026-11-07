@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Explain that a loaded new-chat home has no open conversation, while retaining the cold-start timeout refusal.
+- Show the specific safe failure reason for `ui-*` errors, including UI lock timeout; hide raw CuaDriver output.
 - Ignore structured Codex question answers and context injections when checking whether a delivery reply was interrupted by another user message.
 - Cache the native AX Swift bridge as a source-hashed, permission-checked binary; fall back to interpreting the source if compilation or cache validation fails.
 

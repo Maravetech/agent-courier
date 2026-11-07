@@ -118,6 +118,8 @@ The native bridge is `scripts/codex_ax.swift`, using only macOS AppKit and Appli
 
 The first `ui-*` call compiles the bridge with `swiftc` into a private, source-hashed cache under `~/Library/Caches/agent-courier`; later calls reuse it after file mode and checksum checks. If compilation or cache validation cannot complete, the command interprets the Swift source. This avoids repeated Swift compiler memory peaks while preserving a source fallback.
 
+If `ui-tab` reports `当前在首页，没有打开会话`, the new-chat home is loaded and no session is selected; open the intended session through an authorized front end before sending. A cold-start loading timeout is a separate refusal. `ui-*` errors include a specific safe reason, while raw CuaDriver diagnostics remain hidden because they may contain window text.
+
 ### Loop rules (mandatory)
 
 - Act on and reply to a message only when it starts with `【投递】`. **A `【回复】` never triggers an automatic reply**: it goes back to the original sender, who decides the next step.

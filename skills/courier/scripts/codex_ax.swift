@@ -19,6 +19,12 @@ func fixtureModel(_ raw: [String: Any]) -> (String?, Int, Int) {
                               raw["staticTexts"] as? [String] ?? [], raw["radios"] as? [String] ?? [])
     return (title, raw["areas"] as? Int ?? 0, raw["targets"] as? Int ?? 0)
 }
+func readinessFailure(_ windowTitle: String, _ areaCount: Int) -> String {
+    // A loaded new-chat home has a composer but no conversation title.
+    // A cold start has no composer yet and still needs the warmup timeout.
+    return windowTitle == "ChatGPT" && areaCount == 1
+        ? "当前在首页，没有打开会话" : "聊天工具栏或输入框加载超时"
+}
 func sidebarDecision(_ targets: Int, _ recentCount: Int, _ recentExpanded: Bool?) -> String {
     if targets > 0 { return "target" }
     if recentCount == 1 && recentExpanded == false { return "expand_recent" }
@@ -50,6 +56,10 @@ if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "fixture" {
                 answer = ["ok": true, "tab": title!, "poll": index]
                 break
             }
+        }
+        if answer["ok"] as? Bool != true, let last = rows.last {
+            answer["reason"] = readinessFailure(last["window"] as? String ?? "",
+                                                last["areas"] as? Int ?? 0)
         }
     } else if mode == "button", let row = rows.first {
         if fixtureModel(row).2 >= 1 { answer = ["ok": true, "button_index": 0] }
@@ -260,7 +270,9 @@ while !ready(initial) && Date() < deadline {
     initial = snapshot()
 }
 guard ready(initial) else {
-    emit(["ok": false, "reason": "聊天工具栏或输入框加载超时", "warmup_required": true], 2)
+    emit(["ok": false,
+          "reason": readinessFailure(string(window, kAXTitleAttribute), initial.areas.count),
+          "warmup_required": true], 2)
 }
 if action == "tab" {
     guard let current = tab(initial) else { refuse("标签页不唯一") }

@@ -9,7 +9,7 @@ import unittest
 import importlib.util
 import glob
 import io
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -121,6 +121,46 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("回复抬头：✅", out)
         self.assertIn("收到", out)
+
+    def test_ui_runtime_error_reports_specific_safe_reason(self):
+        for command, args in [('ui-tab', []), ('ui-switch', ['00159 test target']),
+                              ('ui-send', ['--file', 'body.txt', '--session-id', TID,
+                                           '--expect-tab', '00159 test target'])]:
+            with self.subTest(command=command), \
+                 patch.object(courier, 'cmd_ui_tab', side_effect=RuntimeError('Codex UI 锁文件不安全')), \
+                 patch.object(courier, 'cmd_ui_switch', side_effect=RuntimeError('Codex UI 锁文件不安全')), \
+                 patch.object(courier, 'cmd_ui_send', side_effect=RuntimeError('Codex UI 锁文件不安全')), \
+                 patch.object(sys, 'argv', [SCRIPT, command, *args]), \
+                 redirect_stderr(io.StringIO()) as error:
+                with self.assertRaises(SystemExit) as result:
+                    courier.main()
+            self.assertEqual(result.exception.code, 2)
+            self.assertIn('Codex UI 锁文件不安全', error.getvalue())
+        with patch.object(courier, 'cmd_ui_tab', side_effect=TimeoutError('Codex UI 锁超时；持有者 pid=42 command=ui-tab')), \
+             patch.object(sys, 'argv', [SCRIPT, 'ui-tab']), redirect_stderr(io.StringIO()) as error:
+            with self.assertRaises(SystemExit) as result:
+                courier.main()
+        self.assertEqual(result.exception.code, 2)
+        self.assertIn('Codex UI 锁超时', error.getvalue())
+
+    def test_cua_driver_error_does_not_echo_private_output(self):
+        failed = SimpleNamespace(returncode=7, stdout='PRIVATE-BODY', stderr='PRIVATE-CREDENTIAL')
+        with patch.object(subprocess, 'run', return_value=failed):
+            with self.assertRaises(RuntimeError) as error:
+                courier.cua('list_apps', {})
+        self.assertIn('list_apps', str(error.exception))
+        self.assertIn('退出码 7', str(error.exception))
+        self.assertNotIn('PRIVATE-BODY', str(error.exception))
+        self.assertNotIn('PRIVATE-CREDENTIAL', str(error.exception))
+
+    def test_ui_tab_shows_homepage_reason_from_native_bridge(self):
+        args = SimpleNamespace(window_id=None)
+        with patch.object(courier, 'USE_NATIVE_AX', True), \
+             patch.object(courier, 'native_ui_action', return_value={
+                 'ok': False, 'reason': '当前在首页，没有打开会话'}), \
+             redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(courier.cmd_ui_tab.__wrapped__(args), 2)
+        self.assertIn('当前在首页，没有打开会话', output.getvalue())
 
     def test_wait_accepts_new_token_after_bootstrap_user_before_first_reply(self):
         path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
@@ -1385,6 +1425,17 @@ class SwiftAXFixtureTest(unittest.TestCase):
                 'staticTexts': ['00174 courier AX 投递测试'], 'radios': [], 'areas': 1}
         self.assertEqual(self.fixture('ready', [cold, cold, warm])[1]['poll'], 2)
         self.assertEqual(self.fixture('ready', [cold, cold])[0], 2)
+
+    def test_homepage_reports_no_open_chat_without_relaxing_readiness(self):
+        home = {'window': 'ChatGPT', 'toolbars': 1,
+                'staticTexts': [], 'radios': [], 'areas': 1}
+        cold = dict(home, areas=0)
+        code, result = self.fixture('ready', [home])
+        self.assertEqual(code, 2)
+        self.assertEqual(result.get('reason'), '当前在首页，没有打开会话')
+        code, result = self.fixture('ready', [cold])
+        self.assertEqual(code, 2)
+        self.assertEqual(result.get('reason'), '聊天工具栏或输入框加载超时')
 
     def test_switch_accepts_delayed_title_only_after_matching_readback(self):
         old = {'window': '00159 投递courier', 'toolbars': 1,
