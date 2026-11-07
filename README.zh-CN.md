@@ -104,6 +104,10 @@ Codex 闲置后若暂时读不到匹配的 `AXWindows`，桥接先做一次只�
 
 `ui-tab`、`ui-switch`、`ui-send` 共用 `$COURIER_STATE_DIR` 下的跨进程 Codex 界面锁，避免多个进程同时操作同一个 Codex 窗口。锁记录持有者 PID 与命令，进程退出即释放；默认 10 秒超时，可用 `--lock-timeout <秒>` 调整。只有使用同一状态目录的本版 courier 进程会遵守该锁；直接调用 cua-driver 或仍用旧插件的 Agent 不受约束。发送前还会核对抬头收件编号与当前标签页编号。
 
+原生 AX 桥接首次用 `swiftc` 编译，二进制缓存在 `~/Library/Caches/agent-courier`，后续 `ui-*` 命令复用。缓存文件名含 Swift 源码 SHA-256；复用前检查私有目录、仅本人可读写执行的权限以及二进制校验清单。源码或缓存被改动时重编；编译或缓存不可用时退回解释执行，不运行未通过校验的旧二进制。
+
+`wait` 会忽略完整、结构化的 Codex 问答控制封套（如 `<send_user_message_question_reply>`）和环境、外部上下文注入；投递后的普通用户新消息仍判为 `interleaved`。rollout 没有能区分「人工消息完整仿造控制封套」的独立来源标记，因此这一极少见情形无法仅靠记录辨别。
+
 ## 环境要求
 
 macOS、Codex 桌面 App、Python 3.8 及以上（只用标准库）；备用 `ui-*` 通道还需要 Swift 命令行工具和 cua-driver。可选：带 Computer use 的 Claude 桌面 App、Codex 命令行。实测过的版本见 [PREREQUISITES.md](skills/courier/PREREQUISITES.md)。

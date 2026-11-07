@@ -286,6 +286,42 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn('其他用户消息', out)
 
+    def test_wait_ignores_structured_question_reply_but_not_new_request(self):
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        original = Path(path).read_text(encoding='utf-8')
+        marker = msg('2026-01-02T00:00:02.000Z', 'assistant', '【回复】Codex·00159 → Claude Code·0007\n收到')
+        control = '<send_user_message_question_reply>\n' + json.dumps([
+            {'questionItemId': 'q1', 'question': 'Proceed?', 'answer': 'Yes'}
+        ]) + '\n</send_user_message_question_reply>'
+        Path(path).write_text(original.replace(marker,
+            msg('2026-01-02T00:00:01.750Z', 'user', control) + '\n' + marker), encoding='utf-8')
+        code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '0')
+        self.assertEqual(code, 0, out)
+        self.assertIn('回复抬头：✅', out)
+
+        Path(path).write_text(original.replace(marker,
+            msg('2026-01-02T00:00:01.800Z', 'user',
+                '<environment_context>test</environment_context> new human request') + '\n' + marker),
+            encoding='utf-8')
+        code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '0')
+        self.assertEqual(code, 1, out)
+        # A human message containing the same tag is not a complete control envelope.
+        Path(path).write_text(original.replace(marker,
+            msg('2026-01-02T00:00:01.750Z', 'user', control + '\nnew request') + '\n' + marker), encoding='utf-8')
+        code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '0')
+        self.assertEqual(code, 1, out)
+        self.assertIn('其他用户消息', out)
+
+    def test_wait_ignores_codex_system_envelopes_after_delivery(self):
+        path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
+        original = Path(path).read_text(encoding='utf-8')
+        marker = msg('2026-01-02T00:00:02.000Z', 'assistant', '【回复】Codex·00159 → Claude Code·0007\n收到')
+        extras = [msg('2026-01-02T00:00:01.700Z', 'user', '<environment_context>test</environment_context>'),
+                  msg('2026-01-02T00:00:01.800Z', 'user', '<external_codex_apps_open_page>test</external_codex_apps_open_page>')]
+        Path(path).write_text(original.replace(marker, '\n'.join(extras) + '\n' + marker), encoding='utf-8')
+        code, out = self.run_cli('wait', TID, '--text', 'marker-42', '--timeout', '0')
+        self.assertEqual(code, 0, out)
+
     def test_wait_accepts_initial_cli_new_delivery_after_auto_title(self):
         path = glob.glob(os.path.join(self.tmp.name, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))[0]
         raw = Path(path).read_text(encoding='utf-8').replace('Codex·00159', 'Codex·新建')
@@ -819,6 +855,7 @@ class CourierTest(unittest.TestCase):
         def fake_cua(tool, _args):
             self.fail(f'unexpected cua call after target selection: {tool}')
         with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'prepare_ax_binary', return_value=None, create=True), \
              patch.object(courier, 'cua', side_effect=fake_cua), \
              patch.object(courier.subprocess if hasattr(courier, 'subprocess') else subprocess, 'run', return_value=fake) as run:
             result = courier.native_ui_action('tab')
@@ -827,6 +864,66 @@ class CourierTest(unittest.TestCase):
         self.assertIn('codex_ax.swift', command[1])
         self.assertEqual(command[4:6], ['42', '111'])
         self.assertEqual(len(command), 7)
+
+    def test_native_ax_uses_cached_binary_when_available(self):
+        fake = SimpleNamespace(returncode=0, stdout=json.dumps({'ok': True, 'tab': '00159 test target'}))
+        with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'prepare_ax_binary', return_value='/private/tmp/cached-ax', create=True), \
+             patch.object(subprocess, 'run', return_value=fake) as run:
+            self.assertEqual(courier.native_ui_action('tab')['tab'], '00159 test target')
+        self.assertEqual(run.call_args.args[0][0], '/private/tmp/cached-ax')
+
+    def test_ax_cache_recompiles_changed_or_tampered_binary(self):
+        source = Path(self.tmp.name, 'bridge.swift')
+        source.write_text('print("one")', encoding='utf-8')
+        calls = []
+        def compiler(command, **_kwargs):
+            calls.append(command)
+            Path(command[command.index('-o') + 1]).write_bytes(b'compiled-' + str(len(calls)).encode())
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+        with patch.object(courier, 'ax_cache_dir', return_value=str(Path(self.tmp.name, 'cache'))), \
+             patch.object(subprocess, 'run', side_effect=compiler):
+            first = courier.prepare_ax_binary(str(source))
+            self.assertEqual(courier.prepare_ax_binary(str(source)), first)
+            self.assertEqual(len(calls), 1)
+            Path(first).write_bytes(b'tampered')
+            self.assertEqual(courier.prepare_ax_binary(str(source)), first)
+            self.assertEqual(len(calls), 2)
+            source.write_text('print("two")', encoding='utf-8')
+            second = courier.prepare_ax_binary(str(source))
+            self.assertNotEqual(first, second)
+            self.assertEqual(len(calls), 3)
+            os.chmod(second, 0o777)
+            self.assertEqual(courier.prepare_ax_binary(str(source)), second)
+            self.assertEqual(len(calls), 4)
+            cache_dir = Path(second).parent
+            os.chmod(cache_dir, 0o777)
+            self.assertIsNone(courier.prepare_ax_binary(str(source)))
+            self.assertEqual(len(calls), 4)
+
+    def test_ax_cache_compile_failure_falls_back_to_interpreter(self):
+        source = Path(self.tmp.name, 'bridge.swift')
+        source.write_text('broken swift', encoding='utf-8')
+        failed = SimpleNamespace(returncode=1, stdout='', stderr='compile error')
+        with patch.object(courier, 'ax_cache_dir', return_value=str(Path(self.tmp.name, 'cache'))), \
+             patch.object(subprocess, 'run', return_value=failed):
+            self.assertIsNone(courier.prepare_ax_binary(str(source)))
+
+    def test_ax_cache_does_not_follow_binary_symlink(self):
+        source = Path(self.tmp.name, 'bridge.swift')
+        source.write_text('print("one")', encoding='utf-8')
+        def compiler(command, **_kwargs):
+            Path(command[command.index('-o') + 1]).write_bytes(b'compiled')
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+        with patch.object(courier, 'ax_cache_dir', return_value=str(Path(self.tmp.name, 'cache'))), \
+             patch.object(subprocess, 'run', side_effect=compiler):
+            binary = Path(courier.prepare_ax_binary(str(source)))
+            binary.unlink()
+            target = Path(self.tmp.name, 'target.txt')
+            target.write_text('untouched', encoding='utf-8')
+            binary.symlink_to(target)
+            self.assertEqual(Path(courier.prepare_ax_binary(str(source))), binary)
+            self.assertEqual(target.read_text(encoding='utf-8'), 'untouched')
 
     def test_native_ax_cold_start_primes_once_then_retries(self):
         calls = []
@@ -837,6 +934,7 @@ class CourierTest(unittest.TestCase):
         runs = [SimpleNamespace(returncode=2, stdout=json.dumps({'ok': False, 'warmup_required': True})),
                 SimpleNamespace(returncode=0, stdout=json.dumps({'ok': True, 'tab': '00174 test'}))]
         with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'prepare_ax_binary', return_value=None, create=True), \
              patch.object(courier, 'cua', side_effect=fake_cua), \
              patch.object(subprocess, 'run', side_effect=runs) as run:
             self.assertEqual(courier.native_ui_action('tab')['tab'], '00174 test')
@@ -854,6 +952,7 @@ class CourierTest(unittest.TestCase):
             {'ok': False, 'reason': 'App AXWindows 与屏上窗口无法唯一匹配',
              'warmup_required': True, 'warmup_stage': 'window'}))
         with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'prepare_ax_binary', return_value=None, create=True), \
              patch.object(courier, 'cua', side_effect=fake_cua), \
              patch.object(subprocess, 'run', side_effect=[missing, missing]) as run:
             result = courier.native_ui_action('tab')
@@ -869,6 +968,7 @@ class CourierTest(unittest.TestCase):
              'warmup_required': True, 'warmup_stage': 'window'}))
         ready = SimpleNamespace(returncode=0, stdout=json.dumps({'ok': True, 'tab': '00159 test target'}))
         with patch.object(courier, 'cua_target', return_value=(42, 111)), \
+             patch.object(courier, 'prepare_ax_binary', return_value=None, create=True), \
              patch.object(courier, 'cua', side_effect=lambda tool, args: calls.append((tool, args)) or '{}'), \
              patch.object(subprocess, 'run', side_effect=[missing, ready]) as run:
             self.assertEqual(courier.native_ui_action('tab')['tab'], '00159 test target')

@@ -103,6 +103,10 @@ The first real delivery was verified in an isolated Codex test session on 2026-1
 
 `ui-tab`, `ui-switch`, and `ui-send` share a cross-process Codex UI lock in `COURIER_STATE_DIR` to serialize access to the shared Codex window. The lock records the holder PID and command, releases on process exit, and times out after 10 seconds by default (`--lock-timeout <seconds>`). Only courier processes using this version and the same state directory cooperate; direct cua-driver calls and older installed copies do not. The send path also checks that the header receiver number matches the current tab number before writing.
 
+The native AX bridge is compiled once with `swiftc` into `~/Library/Caches/agent-courier` and reused by `ui-*` commands. The cache name includes the Swift source SHA-256; a private directory, owner-only file modes, and a binary checksum manifest are checked before reuse. A changed or untrusted cache entry is recompiled, and a compiler/cache failure falls back to interpreting the Swift source. No cached binary is used after a failed integrity check.
+
+`wait` ignores complete, structured Codex question-answer control envelopes such as `<send_user_message_question_reply>`, as well as Codex environment/external context injections. A new ordinary user message after the delivery still makes the turn `interleaved`. The rollout does not provide a distinct provenance marker for a human message that exactly imitates a control envelope, so this filtering cannot distinguish that rare case.
+
 ## Requirements
 
 macOS, the Codex desktop app, Python 3.8+ (standard library only), Swift command line tools, and cua-driver for the fallback `ui-*` channel. Optional: Claude desktop app with Computer use, Codex CLI. Tested versions are listed in [PREREQUISITES.md](skills/courier/PREREQUISITES.md).

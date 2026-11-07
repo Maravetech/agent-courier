@@ -116,7 +116,27 @@ def text_of(payload):
 
 def is_real_user(t):
     s = t.lstrip()
-    return bool(s) and not s.startswith("<environment_context>") and not s.startswith("<external_")
+    if not s:
+        return False
+    # Async answers to a Codex question are recorded as user messages inside
+    # the same turn. Require the complete, structured envelope so ordinary
+    # follow-up text containing this tag still interrupts attribution.
+    import re
+    if re.fullmatch(r"<(environment_context|external_[a-z0-9_]+)>.*?</\1>",
+                    s.strip(), re.S):
+        return False
+    match = re.fullmatch(r"<send_user_message_question_reply>\s*(.*?)\s*"
+                         r"</send_user_message_question_reply>", s.strip(), re.S)
+    if match:
+        try:
+            answers = json.loads(match.group(1))
+        except ValueError:
+            answers = None
+        if (isinstance(answers, list) and bool(answers)
+                and all(isinstance(item, dict) and isinstance(item.get("questionItemId"), str)
+                        and isinstance(item.get("answer"), str) for item in answers)):
+            return False
+    return True
 
 
 def codex_scan(path, since=None):
@@ -1114,6 +1134,113 @@ def cua_target(window_id=None):
     return pid, wins[0]["window_id"]
 
 
+def ax_cache_dir():
+    return os.path.expanduser("~/Library/Caches/agent-courier")
+
+
+def prepare_ax_binary(script):
+    """Use a private, source-keyed Swift binary; never execute an unverified cache file.
+
+    A cache or compiler failure returns None so the caller can run the source
+    with ``swift``. No compiler diagnostics or UI text are printed here.
+    """
+    import fcntl
+    import hashlib
+    import stat
+    import subprocess
+    import tempfile
+
+    def digest(path, mode=None):
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or
+                    (mode is not None and (info.st_mode & 0o777) != mode) or
+                    (mode is not None and (info.st_uid != os.getuid() or info.st_nlink != 1))):
+                return None
+            h = hashlib.sha256()
+            with os.fdopen(os.dup(fd), "rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        finally:
+            os.close(fd)
+
+    def read_manifest(path):
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_nlink != 1 or (info.st_mode & 0o777) != 0o600
+                    or info.st_size > 1024):
+                return None
+            with os.fdopen(os.dup(fd), "r", encoding="ascii") as stream:
+                value = json.loads(stream.read(1025))
+            return value if isinstance(value, dict) else None
+        finally:
+            os.close(fd)
+
+    try:
+        source_hash = digest(script)
+        if not source_hash:
+            return None
+        cache_dir = ax_cache_dir()
+        os.makedirs(os.path.dirname(cache_dir), exist_ok=True)
+        try:
+            os.mkdir(cache_dir, 0o700)
+        except FileExistsError:
+            pass
+        directory = os.lstat(cache_dir)
+        if (not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.getuid()
+                or (directory.st_mode & 0o777) != 0o700):
+            return None
+        binary = os.path.join(cache_dir, "codex-ax-" + source_hash)
+        manifest = binary + ".json"
+        lock_fd = os.open(os.path.join(cache_dir, ".compile.lock"),
+                          os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            lock_stat = os.fstat(lock_fd)
+            if (not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_uid != os.getuid()
+                    or lock_stat.st_nlink != 1 or (lock_stat.st_mode & 0o777) != 0o600):
+                return None
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                metadata = read_manifest(manifest)
+                if (metadata and metadata.get("source_sha256") == source_hash
+                        and digest(binary, 0o700) == metadata.get("binary_sha256")
+                        and digest(script) == source_hash):
+                    return binary
+            except (OSError, ValueError, UnicodeError, AttributeError):
+                pass
+
+            temp_fd, temp_binary = tempfile.mkstemp(prefix=".codex-ax-", dir=cache_dir)
+            os.close(temp_fd)
+            temp_manifest = None
+            try:
+                compiled = subprocess.run(["swiftc", "-o", temp_binary, script],
+                                          capture_output=True, text=True, timeout=120)
+                if compiled.returncode != 0 or digest(script) != source_hash:
+                    return None
+                os.chmod(temp_binary, 0o700)
+                binary_hash = digest(temp_binary, 0o700)
+                if not binary_hash:
+                    return None
+                meta_fd, temp_manifest = tempfile.mkstemp(prefix=".codex-ax-meta-", dir=cache_dir)
+                with os.fdopen(meta_fd, "w", encoding="ascii") as stream:
+                    json.dump({"source_sha256": source_hash, "binary_sha256": binary_hash}, stream)
+                os.replace(temp_binary, binary)
+                os.replace(temp_manifest, manifest)
+                return binary
+            finally:
+                for candidate in (temp_binary, temp_manifest):
+                    if candidate and os.path.exists(candidate):
+                        os.unlink(candidate)
+        finally:
+            os.close(lock_fd)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def native_ui_action(action, title="", body="", window_id=None):
     """Pass only the selected window ID to the native AX bridge.
 
@@ -1123,7 +1250,8 @@ def native_ui_action(action, title="", body="", window_id=None):
     import subprocess
     pid, wid = cua_target(window_id)
     script = os.path.join(os.path.dirname(__file__), "codex_ax.swift")
-    cmd = ["swift", script, action, title, str(pid), str(wid), ",".join(SEND_LABELS)]
+    binary = prepare_ax_binary(script)
+    cmd = ([binary] if binary else ["swift", script]) + [action, title, str(pid), str(wid), ",".join(SEND_LABELS)]
     def invoke():
         run = subprocess.run(cmd, input=body, capture_output=True, text=True, timeout=45)
         try:

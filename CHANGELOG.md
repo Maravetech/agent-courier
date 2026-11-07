@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Ignore structured Codex question answers and context injections when checking whether a delivery reply was interrupted by another user message.
+- Cache the native AX Swift bridge as a source-hashed, permission-checked binary; fall back to interpreting the source if compilation or cache validation fails.
+
 ## 0.4.0
 
 - Group pair sessions by App with shared native title/existence checks, `overlay list --json`, and explicit invalid-pair cleanup; unknown metadata does not mark a pair invalid.
