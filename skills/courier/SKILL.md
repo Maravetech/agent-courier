@@ -35,7 +35,7 @@ First time? Go through [`PREREQUISITES.md`](PREREQUISITES.md) and run its self-c
 | `overlay list [--json]` | Read the same session pairs shown by the panel | 0 listed |
 | `ui-tab` / `ui-switch <exact title>` / `ui-send --file <body> --session-id <ID> --expect-tab <exact title>` | Fallback front end for an existing session; use `--window-id <ID>` on each command when multiple Codex windows are on screen | `ui-send`: 0 clicked / 2 refused / 1 no send button |
 | `--app claude <find\|status\|verify\|wait\|watch\|locate\|compose>` | Claude desktop session records (`~/.claude/projects`) | as above |
-| `--app claude send <full local CLI session ID> --file <body>` | Address one Claude Desktop session by its account-scoped `local_…` ID through one `claude -p` / `SendMessage` call; require that session's log readback | 0 delivered / 2 refused / 5 uncertain |
+| `--app claude send <full local CLI session ID> --file <body>` | Address one Claude Desktop session by its account-scoped `local_…` ID through one `claude -p` / `SendMessage` call; a running target may queue the message | 0 accepted, then verify / 2 refused / 5 uncertain |
 | `send <ID> --file <body>` or `send --new --file <body>` | CLI fallback via `codex exec` | 0 submitted / 4 session held by the app |
 
 Session numbers can repeat. **Always act on the session ID.**
@@ -77,7 +77,7 @@ Why the CLI can't be primary: while the Codex app runs, it holds the write lock 
 | Step | Action | Pass when |
 | --- | --- | --- |
 | 1 Locate | `find` → ID | Exactly one |
-| 2 Idle check | `status <ID> -n 1` | `回合：空闲` (idle). If running, `wait` first. Don't interrupt |
+| 2 State check | `status <ID> -n 1` | For Codex UI sending, wait until idle. Claude Desktop `SendMessage` accepts a running target and may queue delivery |
 | 3 Mark time | `date -u +%Y-%m-%dT%H:%M:%SZ` → SINCE | — |
 | 4 Compose | `compose … --out body.txt` | Exit 0 |
 | 5 Send | Front end (below) or `send` | — |
@@ -90,9 +90,9 @@ A delivery is complete only when the **originating session** receives the reply 
 
 ### Codex → Claude Code round trip
 
-1. `--app claude find <four-digit number or exact title>` and `status <ID> -n 0`: find the full CLI session ID of one numbered, idle local Claude Desktop session. Send requires that full ID; a number or title alone is refused because remote and local sessions can share names.
+1. `--app claude find <four-digit number or exact title>` and `status <ID> -n 0`: find the full CLI session ID of one numbered local Claude Desktop session and inspect its state. Send requires that full ID; a number or title alone is refused because remote and local sessions can share names. A running target is allowed; the message may queue until its next tool call.
 2. `--app claude compose --from-agent Codex --from-session <five-digit Codex number> --to <Claude ID> --file body.txt --out msg.txt`. Use a unique marker in the body.
-3. `--app claude send <Claude ID> --file msg.txt`. It checks the CLI login, desktop/CLI account IDs, and the target metadata under the current desktop account without printing credentials. It passes the metadata's `local_…` session ID to one `SendMessage` call and checks the exact `to` and `message`, the Claude Desktop route receipt, and a new identical user message in that local session's log. The direct desktop route has no `msg_id`. A CLI error or uncertain readback is nonzero; check `verify` before any retry.
+3. `--app claude send <Claude ID> --file msg.txt`. It checks the CLI login, desktop/CLI account IDs, the target metadata under the current desktop account, and the disconnected-pair gate without printing credentials. It passes the metadata's `local_…` session ID to one `SendMessage` call and checks the exact `to` and `message` plus the Claude Desktop route receipt. The direct desktop route has no `msg_id`; exit 0 means accepted, not delivered. A CLI error or uncertain receipt is nonzero. Do not retry before `verify`.
 4. `--app claude verify <Claude ID> --text <unique marker> --since <SINCE>`, then `--app claude wait <Claude ID> --text <unique marker>`. Claude's SendMessage inbox appears as a peer user record; the helper unwraps it for these checks. A successful `wait` requires `【回复】Claude Code·NNNN → Codex·NNNNN` as the first line of Claude's final reply.
 5. For an explicit return delivery, Claude uses `compose` to wrap its reply in a new `【投递】Claude Code·NNNN → Codex·NNNNN` message and sends it with courier's Codex front end. The originating Codex session checks `verify` for that return message; if it answers, Claude can `wait` on that new delivery. A bare `【回复】` cannot be passed to `ui-send`, which requires a delivery header. The initial `--app claude wait` already lets the Codex sender read Claude's answer directly from Claude's record.
 
@@ -128,7 +128,7 @@ If `ui-tab` reports `当前在首页，没有打开会话`, the new-chat home is
 
 - Act on and reply to a message only when it starts with `【投递】`. **A `【回复】` never triggers an automatic reply**: it goes back to the original sender, who decides the next step.
 - At most 5 deliveries per task and per session pair. Stop after two rounds with no progress.
-- Never deliver into a session that is running a turn (`status` not idle). Wait for it to return to idle.
+- For Codex UI delivery, never write into a session running a turn (`status` not idle). Claude Desktop `SendMessage` can address a running Claude session; use `verify` and `wait` to observe queued delivery and its reply.
 - One writer per app at a time: finish switch, write and send before anyone else touches the same window. `ui-send` checks the tab and the draft every time.
 - Anything about money, credentials, changing rules or guardrails, live services, or irreversible actions: stop both sides and ask the user.
 

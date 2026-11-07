@@ -1211,6 +1211,9 @@ class ClaudeBackendTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         h = self.tmp.name
+        state_patch = patch.object(courier, 'LOGDIR', os.path.join(h, 'state'))
+        state_patch.start()
+        self.addCleanup(state_patch.stop)
         meta = os.path.join(h, "sessions", AID, "org")
         os.makedirs(meta)
         config = Path(h) / 'Library/Application Support/Claude/config.json'
@@ -1314,7 +1317,7 @@ class ClaudeBackendTest(unittest.TestCase):
              patch.object(subprocess, 'run', side_effect=AssertionError('must not send')):
             self.assertEqual(courier.cmd_send_claude(args), 2)
 
-    def test_claude_send_uses_local_desktop_id_and_requires_local_log_readback(self):
+    def test_claude_send_uses_local_desktop_id_and_reports_acceptance(self):
         body = '【投递】Codex·00159 → Claude Code·0009\n\nlocal-id-marker'
         body_path = Path(self.tmp.name) / 'local-body.txt'
         body_path.write_text(body, encoding='utf-8')
@@ -1348,7 +1351,54 @@ class ClaudeBackendTest(unittest.TestCase):
              patch.object(subprocess, 'run', side_effect=fake_cli) as run, redirect_stdout(io.StringIO()) as output:
             self.assertEqual(courier.cmd_send_claude(args), 0)
         run.assert_called_once()
-        self.assertIn('送达', output.getvalue())
+        self.assertIn('已接受', output.getvalue())
+        self.assertIn('送达待 verify', output.getvalue())
+
+    def test_claude_send_to_running_session_is_accepted_before_log_delivery(self):
+        body = '【投递】Codex·00159 → Claude Code·0009\n\nqueued-marker'
+        body_path = Path(self.tmp.name) / 'queued-body.txt'
+        body_path.write_text(body, encoding='utf-8')
+        path = Path(self.env['CLAUDE_CONFIG_DIR']) / 'projects' / '-tmp-proj' / f'{CID}.jsonl'
+        with path.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'type': 'user', 'timestamp': '2026-01-03T00:00:01Z',
+                'message': {'role': 'user', 'content': 'current turn'}}) + '\n')
+        target = 'local_' + CID
+        stream = '\n'.join(json.dumps(x, ensure_ascii=False) for x in [
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'tool_use', 'id': 'u1', 'name': 'SendMessage',
+                 'input': {'to': target, 'message': body}}]}},
+            {'type': 'user', 'message': {'content': [
+                {'type': 'tool_result', 'tool_use_id': 'u1', 'content': json.dumps({
+                    'success': True,
+                    'message': "Forwarded to Claude Desktop's session messaging: queued."})}]}}
+        ])
+        with patch.object(courier, 'APP', 'claude'), \
+             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
+             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
+             patch.object(courier, 'claude_account_ready', return_value=(True, '')), \
+             patch.dict(os.environ, {'HOME': self.tmp.name}), \
+             patch.object(subprocess, 'run', return_value=SimpleNamespace(
+                 returncode=0, stdout=stream, stderr='')) as run, \
+             redirect_stdout(io.StringIO()) as output:
+            self.assertTrue(courier.claude_scan(str(path))[1])
+            self.assertEqual(courier.cmd_send_claude(SimpleNamespace(
+                key=CID, file=str(body_path), new=False)), 0)
+        run.assert_called_once()
+        self.assertIn('送达待 verify', output.getvalue())
+        code, _ = self.cli('verify', CID, '--text', 'queued-marker', '--timeout', '0')
+        self.assertEqual(code, 1)
+
+    def test_claude_send_honors_disconnected_pair_gate_before_cli(self):
+        body_path = Path(self.tmp.name) / 'gated-body.txt'
+        body_path.write_text('【投递】Codex·00159 → Claude Code·0009\n\nmarker', encoding='utf-8')
+        with patch.object(courier, 'APP', 'claude'), \
+             patch.object(courier, 'CLAUDE_HOME', self.env['CLAUDE_CONFIG_DIR']), \
+             patch.object(courier, 'CLAUDE_SESSIONS', self.env['COURIER_CLAUDE_SESSIONS']), \
+             patch.object(courier, 'overlay_check', return_value=5) as check, \
+             patch.object(subprocess, 'run', side_effect=AssertionError('gate must stop CLI')):
+            self.assertEqual(courier.cmd_send_claude(SimpleNamespace(
+                key=CID, file=str(body_path), new=False)), 5)
+        check.assert_called_once_with('Codex·00159', 'Claude Code·0009')
 
     def test_claude_send_refuses_name_only_address_even_if_local_index_unique(self):
         body_path = Path(self.tmp.name) / 'local-body.txt'
@@ -1391,7 +1441,7 @@ class ClaudeBackendTest(unittest.TestCase):
         stream = '\n'.join(json.dumps(x, ensure_ascii=False) for x in (call, result))
         self.assertIsNone(courier.sendmessage_receipt(stream, to, body, desktop=True)[0])
 
-    def test_claude_send_does_not_accept_old_identical_log_entry(self):
+    def test_claude_send_does_not_call_old_log_entry_delivered(self):
         body = '【投递】Codex·00159 → Claude Code·0009\n\nrepeat-marker'
         body_path = Path(self.tmp.name) / 'repeat-body.txt'
         body_path.write_text(body, encoding='utf-8')
@@ -1422,12 +1472,15 @@ class ClaudeBackendTest(unittest.TestCase):
              patch.dict(os.environ, {'HOME': self.tmp.name}), \
              patch.object(subprocess, 'run', return_value=SimpleNamespace(
                  returncode=0, stdout=stream, stderr='')) as run, \
-             patch.object(courier.time, 'monotonic', side_effect=[0, 31]), \
-             redirect_stderr(io.StringIO()) as errors:
+             redirect_stdout(io.StringIO()) as output:
             self.assertEqual(courier.cmd_send_claude(SimpleNamespace(
-                key=CID, file=str(body_path), new=False)), 5)
+                key=CID, file=str(body_path), new=False)), 0)
         run.assert_called_once()
-        self.assertIn('目标本地会话记录未确认', errors.getvalue())
+        self.assertIn('送达待 verify', output.getvalue())
+        self.assertNotIn('Claude Desktop 送达', output.getvalue())
+        code, _ = self.cli('verify', CID, '--text', 'repeat-marker', '--since',
+                           time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), '--timeout', '0')
+        self.assertEqual(code, 1)
 
     def test_claude_account_gate_requires_live_login_and_matching_ids(self):
         desktop = Path(self.tmp.name) / 'Library/Application Support/Claude/config.json'

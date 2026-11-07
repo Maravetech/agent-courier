@@ -1095,7 +1095,7 @@ def cmd_send_claude(a):
     if not parsed or not re.fullmatch(r"Codex·\d{5}", parsed[0]):
         print("拒发：正文首行须为 compose 生成的 Codex 五位编号投递抬头", file=sys.stderr)
         return 2
-    d, path = one(a.key)
+    d, _ = one(a.key)
     title = d.get("thread_name") or ""
     number = re.match(r"^(\d{4})(?:\s|$)", title)
     index = load_index()
@@ -1110,10 +1110,8 @@ def cmd_send_claude(a):
     if parsed[1] != token("Claude Code", number.group(1)):
         print("拒发：投递收件令牌与目标 Claude 会话编号不符", file=sys.stderr)
         return 2
-    _, running, _ = claude_scan(path)
-    if running:
-        print("拒发：目标 Claude 会话正在运行；先等待其空闲", file=sys.stderr)
-        return 2
+    if overlay_check(*parsed):
+        return 5
     ready, reason = claude_account_ready()
     if not ready:
         print(f"拒发：{reason}", file=sys.stderr)
@@ -1132,8 +1130,6 @@ def cmd_send_claude(a):
     argv = ["claude", "-p", prompt, "--model", "haiku", "--permission-mode", "auto",
             "--tools", "SendMessage", "--allowedTools", "SendMessage",
             "--output-format", "stream-json", "--verbose"]
-    before, _, _ = claude_scan(path)
-    prior_matches = sum(role == "user" and text == body for _, role, text in before)
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=90)
@@ -1144,19 +1140,10 @@ def cmd_send_claude(a):
     if proc.returncode != 0 or error:
         print(f"发送失败：{error or 'Claude CLI 返回非零'}；送达结果不明，请先 verify 核对", file=sys.stderr)
         return 5
-    # Desktop's direct-session route has no msg_id. Require exact destination
-    # log readback before claiming delivery; never retry an uncertain result.
-    deadline = time.monotonic() + 30
-    while True:
-        messages, _, _ = claude_scan(path)
-        if sum(role == "user" and text == body for _, role, text in messages) > prior_matches:
-            break
-        if time.monotonic() >= deadline:
-            print("发送结果不明：Claude Desktop 工具报成功，但目标本地会话记录未确认；请先 verify 核对", file=sys.stderr)
-            return 5
-        time.sleep(0.5)
-    print(f"Claude Desktop 送达：会话 {d['id']}  SINCE={since}")
-    print(f"下一步：--app claude verify {d['id']} --text <唯一投递片段> --since {since}；再 wait 核对回复抬头")
+    # A running target can queue this message until its next tool call. The
+    # desktop route has no msg_id, so a successful receipt is acceptance only.
+    print(f"Claude Desktop 已接受：会话 {d['id']}  SINCE={since}；送达待 verify")
+    print(f"下一步：--app claude verify {d['id']} --text <唯一投递片段> --since {since}；再 wait 核对回复抬头。未核对前不要重发。")
     return 0
 
 
