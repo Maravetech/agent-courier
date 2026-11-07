@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix Codex-to-Claude Desktop sending: use the uniquely listed full session title instead of the unsupported `local_…` address. A one-process `ListAgents` tool gate blocks missing or duplicate Desktop targets and permits one exact `SendMessage`; success requires `msg_id`.
 - Read the frontmost desktop App through `NSWorkspace`; duplicate active browser processes no longer block Codex UI delivery. Codex still blocks when it is frontmost.
 - Address Claude Desktop sends by an account-scoped local session ID and refuse ambiguous name-based destinations. A running target may queue delivery; send reports acceptance, while `verify` reads the destination log. This narrows `--app claude send` to full CLI session IDs.
 - Explain that a loaded new-chat home has no open conversation, while retaining the cold-start timeout refusal.
