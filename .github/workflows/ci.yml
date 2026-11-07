@@ -3,7 +3,7 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
-  test:
+  tests:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -20,3 +20,11 @@ jobs:
         run: sh overlay/build.sh
       - name: Check manifests are valid JSON
         run: python -c "import json;[json.load(open(p)) for p in ('.claude-plugin/plugin.json','.claude-plugin/marketplace.json')]"
+  test:
+    name: test
+    needs: tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.tests.result != 'success'
+        run: exit 1
