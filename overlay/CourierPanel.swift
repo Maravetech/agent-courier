@@ -35,9 +35,12 @@ private final class Panel: NSObject, NSApplicationDelegate, NSWindowDelegate {
         root.wantsLayer = true; root.layer?.cornerRadius = 12
         root.autoresizingMask = [.width, .height]; window.contentView = root
         reload()
-        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        if #available(macOS 14.0, *) { NSApp.activate() }
+        else { NSApp.activate(ignoringOtherApps: true) }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.reload() }
     }
+    func applicationDidBecomeActive(_ note: Notification) { window?.makeKeyAndOrderFront(nil) }
     func windowDidResignKey(_ notification: Notification) { NSApp.terminate(nil) }
     func windowWillClose(_ notification: Notification) { NSApp.terminate(nil) }
     private func text(_ value: String, size: CGFloat = 12, bold: Bool = false) -> NSTextField {

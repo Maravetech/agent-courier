@@ -167,6 +167,7 @@ private final class CAIconWindow {
 final class CAOverlayRenderer {
     private var pairs: [String: CAPairWindow] = [:]
     private var icon: CAIconWindow?
+    var iconFrame: CGRect? { icon?.frame }
     private var completionGeneration = 0
     private let scale: (CGPoint) -> Double
     private let art = CodeBirdArt()

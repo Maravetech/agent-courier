@@ -32,7 +32,6 @@ private final class Overlay {
     private var fileSource: DispatchSourceFileSystemObject?
     private var maintenanceTimer: Timer?
     private let renderer = CAOverlayRenderer(scale: { point in displayScale(Point(x: point.x, y: point.y)) })
-    private var iconVisible = false
     private var lastData = Data()
     private var initialConfig = Data(), lastConfig = Data(), lastLinks = Data()
     private var lastLocate = 0.0
@@ -43,8 +42,7 @@ private final class Overlay {
     private var rolloutSources: [String: DispatchSourceFileSystemObject] = [:]
     private var rolloutTrackers: [String: RolloutTracker] = [:]
     private var rolloutActivity: [String: Double] = [:]
-    private var iconRect = CGRect.zero
-    private var clickTap: CFMachPort?
+    private var clickTap: MenuClickTap?
     private var panelProcess: Process?
     private var instanceLock: Int32 = -1
     private var stateLog: URL { folder.appendingPathComponent("skylight.log") }
@@ -59,7 +57,14 @@ private final class Overlay {
         }
         if let error = caInit() { log("private_symbol_missing: \(String(cString: error))"); return }
         locator.observeChanges { [weak self] in self?.reload(force: true) }
-        if !fixture { setupClickTap() }
+        if !fixture {
+            setupClickTap()
+            CGDisplayRegisterReconfigurationCallback({ _, flags, context in
+                guard !flags.contains(.beginConfigurationFlag), let context else { return }
+                let overlay = Unmanaged<Overlay>.fromOpaque(context).takeUnretainedValue()
+                DispatchQueue.main.async { overlay.reload(force: true) }
+            }, Unmanaged.passUnretained(self).toOpaque())
+        }
         let fd = Darwin.open(folder.path, O_EVTONLY)
         if fd >= 0 {
             let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename], queue: .main)
@@ -91,36 +96,18 @@ private final class Overlay {
     }
     private func setupClickTap() {
         guard CGPreflightListenEventAccess() else { log("menu_click_unavailable: input monitoring not authorized"); return }
-        let mask = (CGEventMask(1) << CGEventType.leftMouseDown.rawValue) | (CGEventMask(1) << CGEventType.leftMouseUp.rawValue)
-        let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
-                                    eventsOfInterest: mask, callback: { _, type, event, context in
-            guard let context else { return Unmanaged.passUnretained(event) }
-            let overlay = Unmanaged<Overlay>.fromOpaque(context).takeUnretainedValue()
-            if overlay.iconVisible && overlay.iconRect.contains(event.location) {
-                if type == .leftMouseDown { overlay.openPanel() }
-                return nil
-            }
-            return Unmanaged.passUnretained(event)
-        }, userInfo: Unmanaged.passUnretained(self).toOpaque())
-        guard let tap else { log("menu_click_unavailable: event tap failed"); return }
+        let tap = MenuClickTap(onClick: { [weak self] in self?.openPanel(at: $0) },
+                               log: { [weak self] in self?.log($0) })
         clickTap = tap
-        let source = CFMachPortCreateRunLoopSource(nil, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        tap.start()
     }
-    private func openPanel() {
+    private func openPanel(at point: CGPoint) {
+        guard renderer.iconFrame?.contains(point) == true else { return }
         if panelProcess?.isRunning == true { return }
         let binary = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/courier-panel")
         guard FileManager.default.isExecutableFile(atPath: binary.path) else { log("menu_panel_missing"); return }
         let process = Process(); process.executableURL = binary; process.arguments = [stateURL.path]
         do { try process.run(); panelProcess = process } catch { log("menu_panel_failed: \(error.localizedDescription)") }
-    }
-    private func updateIcon(_ present: Bool) {
-        iconVisible = present
-        if present && iconRect == .zero {
-            let screen = CGDisplayBounds(CGMainDisplayID())
-            iconRect = CGRect(x: min(screen.maxX-200, screen.midX+180), y: screen.minY+2, width: 28, height: 24)
-        }
     }
     private func reload(force: Bool = false) {
         let quit = folder.appendingPathComponent("quit")
@@ -136,7 +123,6 @@ private final class Overlay {
         guard force || data != lastData || config != lastConfig || links != lastLinks || now-lastLocate >= 1 else { return }
         lastData = data; lastConfig = config; lastLinks = links; lastLocate = now
         let all = (try? JSONDecoder().decode(Snapshot.self, from: data))?.pairs ?? []
-        updateIcon(!all.isEmpty)
         exitGeneration += 1
         if all.isEmpty {
             let generation = exitGeneration
@@ -163,9 +149,10 @@ private final class Overlay {
                 state: pair.state, motionAt: pair.motion_at ?? pair.updated_at,
                 disconnected: disconnectedKeys.contains(pair.key)))
         }
-        if !renderer.update(entries, iconRect: iconVisible ? iconRect : nil, enabled: true) {
-            iconVisible = false; log("ca_renderer_unavailable")
+        if !renderer.update(entries, iconRect: all.isEmpty ? nil : currentMenuIconFrame(), enabled: true) {
+            log("ca_renderer_unavailable")
         }
+        clickTap?.setFrame(renderer.iconFrame)
         if all.isEmpty { maintenanceTimer?.invalidate(); maintenanceTimer = nil }
         else if maintenanceTimer == nil && !visualProbe {
             maintenanceTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in self?.maintenanceTick() }
@@ -244,6 +231,7 @@ private final class Overlay {
             }
             maintain()
         }
+        if let frame = renderer.iconFrame, frame != currentMenuIconFrame() { reload(force: true) }
         _ = malloc_zone_pressure_relief(nil, 0)
     }
 }
