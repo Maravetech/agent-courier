@@ -49,6 +49,7 @@ npx skills add Maravetech/agent-courier --skill courier -g -a codex -y
 git clone https://github.com/Maravetech/agent-courier
 cd agent-courier && ./install.sh          # links skills/courier into ~/.agents/skills etc.
 ./install.sh --check                      # verify only
+```
 
 For a new Codex CLI session on another registered Mac, use `python3 -I
 skills/courier/scripts/courier.py send --host mac2 --new --file message.txt`.
@@ -65,7 +66,16 @@ on Mac3 (use `mac1-sun` or `mac2-moon` on the other machines). Then send with
 runs `ui-switch`, `ui-send`, and `wait` locally; it refuses if its Accessibility
 permission or the App state is unsuitable. Check its log in
 `~/.local/state/courier/<machine>-receiver.log` before using this channel.
-```
+
+For automatic return delivery, use `dispatch --from-host mac1 --from-app codex
+--from-session <ID> --host mac2 --new --file body.txt`. Courier assigns a
+dispatch ID, adds the route header, waits for the target reply, and returns it
+to the source. A Codex source gets a new message in its original session;
+Claude Code and DSH sources get a file in
+`~/.local/state/courier/inbox/<app>/<id>.txt`. Read that file with
+`wait --dispatch-id <id>`. Use `dispatch-status --id <id> --host mac2` to
+inspect the target receipt. Retry with the same ID to avoid duplicate sends.
+Existing `send`, `wait`, and `status` commands remain supported.
 
 Then go through **[PREREQUISITES.md](skills/courier/PREREQUISITES.md)** item by item: macOS permissions, turning on Computer use, approving Codex access, the CLI sign-in, and a self-check. Don't skip it.
 

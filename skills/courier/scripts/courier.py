@@ -296,6 +296,11 @@ def cmd_verify(a):
 
 
 def cmd_wait(a):
+    if getattr(a, "dispatch_id", None):
+        return cmd_wait_dispatch(a)
+    if not a.key or not a.since:
+        print("wait 需要会话与 --since，或使用 --dispatch-id", file=sys.stderr)
+        return 2
     d, path = one(a.key)
     deadline = time.time() + a.timeout
     while True:
@@ -366,6 +371,12 @@ def has_header(text):
     return first.startswith(HEADER_PREFIX) and "→" in first and "·" in first
 
 
+def internal_return_ok(text, enabled):
+    first = text.splitlines()[0] if text else ""
+    return bool(enabled and first.startswith(REPLY_PREFIX) and "→" in first and
+                "·" in first and "派单编号：" in text)
+
+
 def session_number(thread_name, thread_id):
     import re
     m = re.match(r"\s*(\d{3,})", thread_name or "")
@@ -419,7 +430,8 @@ def cmd_send(a):
     if not os.path.isfile(a.file):
         print(f"正文文件不存在：{a.file}", file=sys.stderr)
         return 2
-    if not has_header(open(a.file, encoding="utf-8").read()):
+    send_text = open(a.file, encoding="utf-8").read()
+    if not has_header(send_text) and not internal_return_ok(send_text, getattr(a, "return_delivery", False)):
         print("拒发：正文第一行没有投递抬头（谁发给谁）。先用 compose 生成。", file=sys.stderr)
         return 2
     os.makedirs(LOGDIR, exist_ok=True)
@@ -471,7 +483,388 @@ def cmd_send(a):
 
 
 REMOTE_HOSTS = {"mac1": "mac1", "mac2": "mac2", "mac3": "mac3"}
+MACHINE_NAMES = {"mac1": "mac1-sun", "mac2": "mac2-moon", "mac3": "mac3-stars"}
 QUEUE_DIR = os.path.join(LOGDIR, "remote-queue")
+DISPATCH_DIR = os.path.join(LOGDIR, "dispatch")
+
+
+def dispatch_record(dispatch_id):
+    import uuid
+    uuid.UUID(dispatch_id)
+    os.makedirs(DISPATCH_DIR, mode=0o700, exist_ok=True)
+    return os.path.join(DISPATCH_DIR, dispatch_id + ".json")
+
+
+def dispatch_save(path, record):
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=DISPATCH_DIR,
+                                     prefix=".dispatch-", delete=False) as f:
+        os.fchmod(f.fileno(), 0o600)
+        json.dump(record, f, ensure_ascii=False)
+        temp = f.name
+    os.replace(temp, path)
+
+
+def dispatch_ssh(host, command, payload=None, timeout=30):
+    import subprocess
+    if host not in REMOTE_HOSTS:
+        raise ValueError("未知机器")
+    script = "python3 -I ~/Documents/agent-courier/skills/courier/scripts/courier.py " + command
+    return subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                           REMOTE_HOSTS[host], script], input=payload, text=True,
+                          capture_output=True, timeout=timeout)
+
+
+def cmd_dispatch(a):
+    """Durable cross-Mac delivery with a numbered return route."""
+    import uuid
+    import subprocess
+    if a.host not in REMOTE_HOSTS or a.from_host not in REMOTE_HOSTS:
+        return 2
+    if not a.new and not a.target:
+        print("指定目标会话或使用 --new", file=sys.stderr)
+        return 2
+    if a.from_app == "codex" and not a.from_session:
+        print("Codex 回投需要来源会话 ID", file=sys.stderr)
+        return 2
+    if not os.path.isfile(a.file):
+        return 2
+    body = open(a.file, encoding="utf-8").read()
+    if len(body.encode("utf-8")) > 48000:
+        return 2
+    dispatch_id = a.id or str(uuid.uuid4())
+    try:
+        path = dispatch_record(dispatch_id)
+    except ValueError:
+        return 2
+    if os.path.exists(path):
+        record = json.load(open(path, encoding="utf-8"))
+        if record.get("host") != a.host or record.get("from_session") != a.from_session:
+            print("派单编号已用于其他目标", file=sys.stderr)
+            return 2
+    else:
+        record = {"id": dispatch_id, "from_host": a.from_host,
+                  "from_app": a.from_app, "from_session": a.from_session,
+                  "host": a.host, "target": a.target, "new": a.new,
+                  "body": body, "stage": "created", "attempts": 0,
+                  "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        dispatch_save(path, record)
+    # Retry the same ID only. The target ledger prevents duplicate sends.
+    for attempt in range(3):
+        record["attempts"] += 1
+        dispatch_save(path, record)
+        try:
+            result = dispatch_ssh(a.host, "dispatch-receive", json.dumps(record, ensure_ascii=False), 780)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            print(f"第 {attempt + 1} 次连接失败：{exc}", file=sys.stderr)
+            continue
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, end="")
+        if result.returncode == 0:
+            record["stage"] = "returned"
+            dispatch_save(path, record)
+            return 0
+        if result.returncode not in (1, 3, 4):
+            return result.returncode
+        time.sleep(min(2 ** attempt, 5))
+    print(f"派单 {dispatch_id} 未确认回投；用 dispatch-status 查询，勿更换编号重发", file=sys.stderr)
+    return 3
+
+
+def cmd_dispatch_receive(a):
+    """Target-side state machine. Never re-send after an uncertain submission."""
+    import re
+    import subprocess
+    import tempfile
+    raw = sys.stdin.buffer.read(65537)
+    if len(raw) > 65536:
+        return 2
+    try:
+        req = json.loads(raw)
+        path = dispatch_record(req["id"])
+        if req["from_host"] not in REMOTE_HOSTS or req["from_app"] not in ("codex", "claude", "dsh"):
+            return 2
+    except (ValueError, KeyError, TypeError):
+        return 2
+    if os.path.exists(path):
+        rec = json.load(open(path, encoding="utf-8"))
+        if rec.get("from_host") != req["from_host"] or rec.get("body") != req["body"]:
+            return 2
+    else:
+        rec = req.copy()
+        rec["stage"] = "accepted"
+        dispatch_save(path, rec)
+    if rec["stage"] == "returned":
+        print(f"派单 {rec['id']} 已回投；目标会话 {rec.get('target_session')}")
+        return 0
+    source_token = f"{MACHINE_NAMES[rec['from_host']]}-{rec['from_app']}·{rec['from_session'] or rec['id']}"
+    target_token = f"{MACHINE_NAMES[rec['host']]}-codex·{rec['target'] or 'new'}"
+    marker = f"派单编号：{rec['id']}"
+    message = (header_line(source_token, target_token) + "\n" + marker + "\n\n" +
+               rec["body"] + "\n\n请直接回复任务结果；回投抬头由 courier 添加。\n")
+    if rec["stage"] == "accepted":
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=DISPATCH_DIR,
+                                         prefix="body-", delete=False) as f:
+            f.write(message)
+            body_path = f.name
+        try:
+            args = [sys.executable, "-I", os.path.realpath(__file__), "send"]
+            if rec["new"]:
+                args += ["--new"]
+            else:
+                args += [rec["target"]]
+            result = subprocess.run(args + ["--file", body_path], capture_output=True,
+                                    text=True, timeout=45)
+        finally:
+            os.unlink(body_path)
+        if result.returncode == 4 and not rec["new"]:
+            status_path = os.path.join(QUEUE_DIR, "receiver-status.json")
+            try:
+                status = json.load(open(status_path, encoding="utf-8"))
+                if not status.get("accessibility") or time.time() - status.get("checked", 0) > 30:
+                    print("目标 App 会话在运行，图形接收作业未获辅助功能授权", file=sys.stderr)
+                    return 4
+                d, _ = one(rec["target"])
+            except (OSError, ValueError, TypeError, SystemExit):
+                return 4
+            result_path = os.path.join(QUEUE_DIR, rec["id"] + ".result.json")
+            job_path = os.path.join(QUEUE_DIR, rec["id"] + ".json")
+            if os.path.exists(job_path):
+                job = json.load(open(job_path, encoding="utf-8"))
+            else:
+                job = {"id": rec["id"], "title": d["thread_name"], "body": message,
+                       "source": rec["from_host"], "target": rec["host"],
+                       "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+                if not os.path.exists(result_path):
+                    dispatch_save(job_path, job)
+            deadline = time.time() + 700
+            while time.time() < deadline and not os.path.isfile(result_path):
+                time.sleep(3)
+            if not os.path.isfile(result_path):
+                return 3
+            ui_result = json.load(open(result_path, encoding="utf-8"))
+            if ui_result.get("code"):
+                print(ui_result.get("output", ""), file=sys.stderr)
+                return ui_result["code"]
+            rec["target_session"], rec["since"] = d["id"], rec["created"]
+        elif result.returncode:
+            if result.returncode == 1:
+                rec["stage"] = "unknown"
+                dispatch_save(path, rec)
+                print("目标提交状态未知，拒绝自动重发", file=sys.stderr)
+                return 3
+            print(result.stdout + result.stderr, file=sys.stderr)
+            return result.returncode
+        else:
+            match = re.search(r"会话 ([0-9a-f-]{36})\s+SINCE=(\S+)", result.stdout)
+            if not match:
+                rec["stage"] = "unknown"
+                dispatch_save(path, rec)
+                print("目标提交状态未知，拒绝自动重发", file=sys.stderr)
+                return 3
+            rec["target_session"], rec["since"] = match.groups()
+        rec["stage"] = "posted"
+        dispatch_save(path, rec)
+    if rec["stage"] in ("posted", "read"):
+        sid = rec["target_session"]
+        for _ in range(30):
+            if rollout_path(sid):
+                break
+            time.sleep(1)
+        try:
+            d, logpath = one(sid)
+        except SystemExit:
+            return 3
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            msgs, running, done = scan(logpath, None)
+            sent = [m for m in msgs if m[1] == "user" and marker in m[2]]
+            if sent and rec["stage"] == "posted":
+                rec["stage"] = "read"
+                rec["read_at"] = sent[0][0]
+                dispatch_save(path, rec)
+            replies = [m for m in msgs if m[1] == "assistant" and sent and m[0] >= sent[-1][0]]
+            if sent and replies and done and not running and done[0] >= sent[-1][0]:
+                rec["reply"] = replies[-1][2]
+                rec["stage"] = "replied"
+                rec["replied_at"] = replies[-1][0]
+                dispatch_save(path, rec)
+                break
+            time.sleep(3)
+        if rec["stage"] != "replied":
+            print(f"派单 {rec['id']} 等待回复超时", file=sys.stderr)
+            return 3
+    if rec["stage"] == "replied":
+        # Strip any manually supplied reply header so the return has one canonical header.
+        reply_body = rec["reply"].strip()
+        if reply_body.startswith("【回复】"):
+            reply_body = "\n".join(reply_body.splitlines()[1:]).strip()
+        payload = {"id": rec["id"], "from_app": rec["from_app"],
+                   "from_session": rec["from_session"], "source": rec["from_host"],
+                   "target": rec["host"], "target_session": rec["target_session"],
+                   "message": reply_line(source_token, target_token) + "\n" +
+                              marker + "\n" + reply_body + "\n"}
+        for attempt in range(3):
+            try:
+                result = dispatch_ssh(rec["from_host"], "dispatch-return",
+                                      json.dumps(payload, ensure_ascii=False), 180)
+            except (subprocess.TimeoutExpired, OSError):
+                time.sleep(2 ** attempt)
+                continue
+            if result.returncode == 0:
+                rec["stage"] = "returned"
+                rec["returned_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                dispatch_save(path, rec)
+                print(f"派单 {rec['id']} 已投、已读、已回、已回投；目标会话 {rec['target_session']}")
+                return 0
+            if result.returncode not in (1, 3, 4):
+                print(result.stderr, file=sys.stderr)
+                return result.returncode
+            time.sleep(2 ** attempt)
+    print(f"派单 {rec['id']} 已回，回投未确认", file=sys.stderr)
+    return 3
+
+
+def cmd_dispatch_return(a):
+    """Source-side idempotent return to the original session or local inbox."""
+    import re
+    import subprocess
+    import tempfile
+    raw = sys.stdin.buffer.read(65537)
+    if len(raw) > 65536:
+        return 2
+    try:
+        item = json.loads(raw)
+        path = dispatch_record(item["id"])
+        if item["from_app"] not in ("codex", "claude", "dsh") or not has_header(item["message"].replace("【回复】", "【投递】", 1)):
+            return 2
+    except (ValueError, KeyError, TypeError):
+        return 2
+    receipt = path[:-5] + ".return.json"
+    if os.path.isfile(receipt):
+        old = json.load(open(receipt, encoding="utf-8"))
+        if old.get("message") != item["message"]:
+            return 2
+        if old.get("stage") == "returned":
+            print(f"派单 {item['id']} 已回投")
+            return 0
+    else:
+        dispatch_save(receipt, {**item, "stage": "accepted"})
+    if item["from_app"] in ("claude", "dsh"):
+        inbox = os.path.join(LOGDIR, "inbox", item["from_app"])
+        os.makedirs(inbox, mode=0o700, exist_ok=True)
+        filename = os.path.join(inbox, item["id"] + ".txt")
+        if not os.path.exists(filename):
+            with open(filename, "x", encoding="utf-8") as f:
+                f.write(item["message"])
+        dispatch_save(receipt, {**item, "stage": "returned", "inbox": filename})
+        print(f"派单 {item['id']} 已回投至 {filename}")
+        return 0
+    sid = item.get("from_session")
+    if not sid:
+        return 2
+    marker = f"派单编号：{item['id']}"
+    try:
+        d, logpath = one(sid)
+        existing, _, _ = scan(logpath, None)
+        if any(role == "user" and marker in body for _, role, body in existing):
+            dispatch_save(receipt, {**item, "stage": "returned", "source_session": sid})
+            print(f"派单 {item['id']} 已在来源会话读回")
+            return 0
+    except SystemExit:
+        return 1
+    if os.path.isfile(receipt) and json.load(open(receipt, encoding="utf-8")).get("stage") == "unknown":
+        print("来源会话提交状态未知，需先核记录，不自动重发", file=sys.stderr)
+        return 3
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=DISPATCH_DIR,
+                                     prefix="return-", delete=False) as f:
+        f.write(item["message"])
+        body_path = f.name
+    try:
+        result = subprocess.run([sys.executable, "-I", os.path.realpath(__file__), "send", sid,
+                                 "--file", body_path, "--return-delivery"],
+                                capture_output=True, text=True, timeout=45)
+        if result.returncode == 4:
+            status_path = os.path.join(QUEUE_DIR, "receiver-status.json")
+            try:
+                status = json.load(open(status_path, encoding="utf-8"))
+                if not status.get("accessibility") or time.time() - status.get("checked", 0) > 30:
+                    print("来源 App 会话在运行，图形接收作业未获辅助功能授权", file=sys.stderr)
+                    return 4
+            except (OSError, ValueError, TypeError):
+                return 4
+            job_id = item["id"]
+            job_path = os.path.join(QUEUE_DIR, job_id + ".json")
+            if not os.path.exists(job_path):
+                job = {"id": job_id, "title": d["thread_name"], "body": item["message"],
+                       "source": item["target"], "target": item["source"],
+                       "return_delivery": True,
+                       "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+                dispatch_save(job_path, job)
+            deadline = time.time() + 700
+            result_path = os.path.join(QUEUE_DIR, job_id + ".result.json")
+            while time.time() < deadline and not os.path.isfile(result_path):
+                time.sleep(3)
+            if not os.path.isfile(result_path):
+                return 3
+            ui_result = json.load(open(result_path, encoding="utf-8"))
+            if ui_result.get("code"):
+                print(ui_result.get("output", ""), file=sys.stderr)
+                return ui_result["code"]
+        elif result.returncode:
+            if result.returncode == 1:
+                dispatch_save(receipt, {**item, "stage": "unknown"})
+            print(result.stdout + result.stderr, file=sys.stderr)
+            return result.returncode
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            msgs, _, _ = scan(logpath, None)
+            if any(role == "user" and marker in body for _, role, body in msgs):
+                dispatch_save(receipt, {**item, "stage": "returned", "source_session": sid})
+                print(f"派单 {item['id']} 已回投并在来源会话读回 {sid}")
+                return 0
+            time.sleep(2)
+        return 3
+    finally:
+        os.unlink(body_path)
+
+
+def cmd_dispatch_status(a):
+    if a.host:
+        result = dispatch_ssh(a.host, "dispatch-status --id " + a.id, timeout=20)
+        print(result.stdout, end="")
+        print(result.stderr, file=sys.stderr, end="")
+        return result.returncode
+    try:
+        path = dispatch_record(a.id)
+    except ValueError:
+        return 2
+    if not os.path.isfile(path):
+        return 1
+    rec = json.load(open(path, encoding="utf-8"))
+    print(json.dumps({k: rec.get(k) for k in ("id", "stage", "from_host", "host",
+                                                 "target_session", "read_at", "replied_at", "returned_at")},
+                     ensure_ascii=False))
+    return 0
+
+
+def cmd_wait_dispatch(a):
+    import uuid
+    try:
+        uuid.UUID(a.dispatch_id)
+    except ValueError:
+        return 2
+    deadline = time.time() + a.timeout
+    while time.time() < deadline:
+        for app in ("claude", "dsh"):
+            path = os.path.join(LOGDIR, "inbox", app, a.dispatch_id + ".txt")
+            if os.path.isfile(path):
+                print(open(path, encoding="utf-8").read(), end="")
+                return 0
+        time.sleep(a.interval)
+    return 3
 
 
 def cmd_remote_ui_send(a):
@@ -600,8 +993,11 @@ def cmd_receiver_serve(a):
                     if switch.returncode:
                         code, output = switch.returncode, switch.stdout + switch.stderr
                     else:
-                        sent = subprocess.run([sys.executable, "-I", script, "ui-send", "--file",
-                                               body_path, "--expect-tab", job["title"]],
+                        sent_args = [sys.executable, "-I", script, "ui-send", "--file",
+                                     body_path, "--expect-tab", job["title"]]
+                        if job.get("return_delivery"):
+                            sent_args.append("--return-delivery")
+                        sent = subprocess.run(sent_args,
                                               capture_output=True, text=True, timeout=90)
                         code, output = sent.returncode, switch.stdout + sent.stdout + sent.stderr
                         if code == 0:
@@ -808,7 +1204,7 @@ def cmd_ui_send(a):
     """写输入框（set_value 整框）+ 点「发送」。输入框非空（有草稿）一律拒绝，不覆盖。"""
     import re
     body = open(a.file, encoding="utf-8").read().rstrip()
-    if not has_header(body):
+    if not has_header(body) and not internal_return_ok(body, getattr(a, "return_delivery", False)):
         print("拒发：正文第一行没有投递抬头。先用 compose 生成。", file=sys.stderr)
         return 2
     pid, wid = cua_target()
@@ -860,7 +1256,8 @@ def main():
     s.set_defaults(fn=cmd_status)
     v = sub.add_parser("verify"); v.add_argument("key"); v.add_argument("--text", required=True)
     v.add_argument("--since"); v.set_defaults(fn=cmd_verify)
-    w = sub.add_parser("wait"); w.add_argument("key"); w.add_argument("--since", required=True)
+    w = sub.add_parser("wait"); w.add_argument("key", nargs="?"); w.add_argument("--since")
+    w.add_argument("--dispatch-id")
     w.add_argument("--timeout", type=int, default=600); w.add_argument("--interval", type=float, default=3)
     w.set_defaults(fn=cmd_wait)
     c = sub.add_parser("compose"); c.add_argument("--from-agent", required=True)
@@ -871,10 +1268,12 @@ def main():
     sub.add_parser("ui-tab").set_defaults(fn=cmd_ui_tab)
     us = sub.add_parser("ui-switch"); us.add_argument("title"); us.set_defaults(fn=cmd_ui_switch)
     ud = sub.add_parser("ui-send"); ud.add_argument("--file", required=True); ud.add_argument("--expect-tab", required=True)
+    ud.add_argument("--return-delivery", action="store_true", help=argparse.SUPPRESS)
     ud.set_defaults(fn=cmd_ui_send)
     n = sub.add_parser("send"); n.add_argument("key", nargs="?"); n.add_argument("--file", required=True)
     n.add_argument("--new", action="store_true"); n.add_argument("--cwd")
     n.add_argument("--host", choices=sorted(REMOTE_HOSTS))
+    n.add_argument("--return-delivery", action="store_true", help=argparse.SUPPRESS)
     n.add_argument("--sandbox", default="workspace-write", choices=["read-only", "workspace-write", "danger-full-access"])
     n.set_defaults(fn=cmd_send)
     rr = sub.add_parser("remote-receive", help=argparse.SUPPRESS)
@@ -893,6 +1292,22 @@ def main():
     srv.add_argument("--machine", required=True); srv.set_defaults(fn=cmd_receiver_serve)
     ins = sub.add_parser("receiver-install")
     ins.add_argument("--machine", required=True); ins.set_defaults(fn=cmd_receiver_install)
+    dp = sub.add_parser("dispatch")
+    dp.add_argument("--id")
+    dp.add_argument("--from-host", choices=sorted(REMOTE_HOSTS), required=True)
+    dp.add_argument("--from-app", choices=["codex", "claude", "dsh"], required=True)
+    dp.add_argument("--from-session", required=True)
+    dp.add_argument("--host", choices=sorted(REMOTE_HOSTS), required=True)
+    dp.add_argument("--target")
+    dp.add_argument("--new", action="store_true")
+    dp.add_argument("--file", required=True)
+    dp.set_defaults(fn=cmd_dispatch)
+    sub.add_parser("dispatch-receive", help=argparse.SUPPRESS).set_defaults(fn=cmd_dispatch_receive)
+    sub.add_parser("dispatch-return", help=argparse.SUPPRESS).set_defaults(fn=cmd_dispatch_return)
+    ds = sub.add_parser("dispatch-status")
+    ds.add_argument("--id", required=True)
+    ds.add_argument("--host", choices=sorted(REMOTE_HOSTS))
+    ds.set_defaults(fn=cmd_dispatch_status)
     a = ap.parse_args()
     global APP
     APP = a.app

@@ -121,6 +121,23 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(self.run_cli("send", "--new", "--file", body)[0], 2)
         self.assertEqual(self.run_cli("ui-send", "--file", body, "--expect-tab", "00159")[0], 2)
 
+    def test_dispatch_return_to_claude_inbox_is_idempotent(self):
+        import uuid
+        dispatch_id = str(uuid.uuid4())
+        payload = {"id": dispatch_id, "from_app": "claude", "from_session": "2351",
+                   "source": "mac1", "target": "mac2", "target_session": TID,
+                   "message": f"【回复】mac2-moon-codex·new → mac1-sun-claude·2351\n派单编号：{dispatch_id}\nOK\n"}
+        cmd = [sys.executable, "-I", SCRIPT, "dispatch-return"]
+        first = subprocess.run(cmd, input=json.dumps(payload, ensure_ascii=False),
+                               capture_output=True, text=True, env=self.env)
+        second = subprocess.run(cmd, input=json.dumps(payload, ensure_ascii=False),
+                                capture_output=True, text=True, env=self.env)
+        self.assertEqual((first.returncode, second.returncode), (0, 0))
+        code, out = self.run_cli("wait", "--dispatch-id", dispatch_id, "--timeout", "1")
+        self.assertEqual(code, 0, out)
+        self.assertIn("派单编号：" + dispatch_id, out)
+        self.assertIn("\nOK\n", out)
+
 
 CID = "aaaaaaaa-1111-4222-8333-444444444444"
 
