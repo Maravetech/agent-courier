@@ -608,15 +608,24 @@ def cmd_receiver_serve(a):
 def cmd_receiver_install(a):
     import plistlib
     import subprocess
+    import shutil
     if a.machine not in ("mac1-sun", "mac2-moon", "mac3-stars"):
         return 2
     label = f"com.crosslab.courier.{a.machine}.receiver"
+    repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+    head = subprocess.run(["git", "-C", repo, "rev-parse", "--short=12", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    runtime = os.path.expanduser(f"~/.local/share/courier-runtime/{head}/courier")
+    if not os.path.isdir(runtime):
+        os.makedirs(os.path.dirname(runtime), exist_ok=True)
+        shutil.copytree(os.path.join(repo, "skills/courier"), runtime)
+    runtime_script = os.path.join(runtime, "scripts/courier.py")
     agents = os.path.expanduser("~/Library/LaunchAgents")
     os.makedirs(agents, exist_ok=True)
     os.makedirs(LOGDIR, mode=0o700, exist_ok=True)
     path = os.path.join(agents, label + ".plist")
     data = {"Label": label,
-            "ProgramArguments": [sys.executable, "-I", os.path.realpath(__file__),
+            "ProgramArguments": [sys.executable, "-I", runtime_script,
                                  "receiver-serve", "--machine", a.machine],
             "RunAtLoad": True, "KeepAlive": True,
             "StandardOutPath": os.path.join(LOGDIR, f"{a.machine}-receiver.log"),
@@ -624,6 +633,8 @@ def cmd_receiver_install(a):
     with open(path, "wb") as f:
         plistlib.dump(data, f)
     domain = f"gui/{os.getuid()}"
+    subprocess.run(["launchctl", "bootout", domain + "/" + label],
+                   capture_output=True, text=True)
     p = subprocess.run(["launchctl", "bootstrap", domain, path], capture_output=True, text=True)
     print(f"作业：{label}  配置：{path}")
     if p.returncode:
