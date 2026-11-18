@@ -441,8 +441,12 @@ def cmd_send(a):
         argv = [codex_bin, "exec", "resume", tid, "-"]
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with open(a.file, "rb") as body, open(log, "wb") as out:
+        child_env = os.environ.copy()
+        child_env["PATH"] = os.pathsep.join((os.path.expanduser("~/.local/bin"),
+                                             "/usr/local/bin", "/opt/homebrew/bin",
+                                             child_env.get("PATH", "")))
         subprocess.Popen(argv, stdin=body, stdout=out, stderr=subprocess.STDOUT,
-                         cwd=a.cwd or os.getcwd(), start_new_session=True)
+                         cwd=a.cwd or os.getcwd(), env=child_env, start_new_session=True)
     deadline = time.time() + 30
     while time.time() < deadline:
         time.sleep(1)
@@ -513,6 +517,10 @@ def cmd_remote_receive(a):
         if not match:
             return 1
         sid, since = match.groups()
+        for _ in range(30):
+            if rollout_path(sid):
+                break
+            time.sleep(1)
         w = subprocess.run([sys.executable, "-I", os.path.realpath(__file__), "wait", sid,
                             "--since", since, "--timeout", "600"], capture_output=True,
                            text=True, timeout=620)
