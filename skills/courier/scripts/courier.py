@@ -486,6 +486,35 @@ REMOTE_HOSTS = {"mac1": "mac1", "mac2": "mac2", "mac3": "mac3"}
 MACHINE_NAMES = {"mac1": "mac1-sun", "mac2": "mac2-moon", "mac3": "mac3-stars"}
 QUEUE_DIR = os.path.join(LOGDIR, "remote-queue")
 DISPATCH_DIR = os.path.join(LOGDIR, "dispatch")
+AX_BINARY = os.path.expanduser("~/.local/share/courier-runtime/courier-ax")
+
+
+def native_ax_permission():
+    import subprocess
+    if not os.path.isfile(AX_BINARY):
+        return False
+    try:
+        result = subprocess.run([AX_BINARY, "permission"], capture_output=True,
+                                text=True, timeout=10)
+        return result.returncode == 0 and json.loads(result.stdout).get("accessibility") is True
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+
+
+def native_action(action, title="", body=""):
+    import subprocess
+    if not native_ax_permission():
+        return {"ok": False, "reason": f"原生桥接缺辅助功能授权：{AX_BINARY}"}
+    pid, wid = cua_target()
+    cmd = [AX_BINARY, action, title, str(pid), str(wid), ",".join(SEND_LABELS)]
+    try:
+        result = subprocess.run(cmd, input=body, capture_output=True, text=True, timeout=90)
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict) or (result.returncode == 0) != bool(data.get("ok")):
+            return {"ok": False, "reason": "原生桥接结果与退出码不符"}
+        return data
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {"ok": False, "reason": "原生桥接未返回可核验结果"}
 
 
 def dispatch_record(dispatch_id):
@@ -968,13 +997,11 @@ def cmd_remote_result(a):
 def cmd_receiver_serve(a):
     """Run only as a per-user LaunchAgent in the target graphical session."""
     import subprocess
-    import ctypes
     os.makedirs(QUEUE_DIR, mode=0o700, exist_ok=True)
-    ax = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
-    trusted = bool(ax.AXIsProcessTrusted())
+    trusted = native_ax_permission()
     print(f"receiver {a.machine} pid={os.getpid()} accessibility={trusted}", flush=True)
     while True:
-        trusted = bool(ax.AXIsProcessTrusted())
+        trusted = native_ax_permission()
         with open(os.path.join(QUEUE_DIR, "receiver-status.json"), "w", encoding="utf-8") as f:
             json.dump({"machine": a.machine, "pid": os.getpid(), "accessibility": trusted,
                        "checked": time.time()}, f)
@@ -993,6 +1020,9 @@ def cmd_receiver_serve(a):
             job = {"id": name[:-5]}
             try:
                 job = json.load(open(running, encoding="utf-8"))
+                if not (has_header(job["body"]) or
+                        internal_return_ok(job["body"], job.get("return_delivery", False))):
+                    raise ValueError("接收正文缺合法抬头")
                 import tempfile
                 with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=QUEUE_DIR,
                                                  prefix="body-", delete=False) as f:
@@ -1000,18 +1030,13 @@ def cmd_receiver_serve(a):
                     body_path = f.name
                 try:
                     script = os.path.realpath(__file__)
-                    switch = subprocess.run([sys.executable, "-I", script, "ui-switch", job["title"]],
-                                            capture_output=True, text=True, timeout=90)
-                    if switch.returncode:
-                        code, output = switch.returncode, switch.stdout + switch.stderr
+                    switch = native_action("switch", job["title"])
+                    if not switch.get("ok"):
+                        code, output = 2, switch.get("reason", "切页失败")
                     else:
-                        sent_args = [sys.executable, "-I", script, "ui-send", "--file",
-                                     body_path, "--expect-tab", job["title"]]
-                        if job.get("return_delivery"):
-                            sent_args.append("--return-delivery")
-                        sent = subprocess.run(sent_args,
-                                              capture_output=True, text=True, timeout=90)
-                        code, output = sent.returncode, switch.stdout + sent.stdout + sent.stderr
+                        sent = native_action("send", job["title"], job["body"].rstrip())
+                        code = 0 if sent.get("ok") else 2
+                        output = json.dumps({"switch": switch, "send": sent}, ensure_ascii=False) + "\n"
                         if code == 0:
                             waited = subprocess.run([sys.executable, "-I", script, "wait", job["title"],
                                                      "--since", job["created"], "--timeout", "600"],
@@ -1034,6 +1059,7 @@ def cmd_receiver_install(a):
     import plistlib
     import subprocess
     import shutil
+    import hashlib
     if a.machine not in ("mac1-sun", "mac2-moon", "mac3-stars"):
         return 2
     label = f"com.crosslab.courier.{a.machine}.receiver"
@@ -1045,6 +1071,21 @@ def cmd_receiver_install(a):
         os.makedirs(os.path.dirname(runtime), exist_ok=True)
         shutil.copytree(os.path.join(repo, "skills/courier"), runtime)
     runtime_script = os.path.join(runtime, "scripts/courier.py")
+    swift_source = os.path.join(runtime, "scripts/codex_ax.swift")
+    source_hash = hashlib.sha256(open(swift_source, "rb").read()).hexdigest()
+    hash_path = AX_BINARY + ".sha256"
+    if not os.path.isfile(AX_BINARY) or not os.path.isfile(hash_path) or open(hash_path).read() != source_hash:
+        os.makedirs(os.path.dirname(AX_BINARY), mode=0o700, exist_ok=True)
+        temp_binary = AX_BINARY + ".building"
+        built = subprocess.run(["/usr/bin/swiftc", swift_source, "-o", temp_binary],
+                               capture_output=True, text=True, timeout=180)
+        if built.returncode:
+            print(f"原生桥接编译失败：{built.stderr[-500:]}", file=sys.stderr)
+            return 2
+        os.chmod(temp_binary, 0o700)
+        os.replace(temp_binary, AX_BINARY)
+        with open(hash_path, "w") as f:
+            f.write(source_hash)
     agents = os.path.expanduser("~/Library/LaunchAgents")
     os.makedirs(agents, exist_ok=True)
     os.makedirs(LOGDIR, mode=0o700, exist_ok=True)
@@ -1065,7 +1106,7 @@ def cmd_receiver_install(a):
     if p.returncode:
         print(f"未启动：{p.stderr.strip()}", file=sys.stderr)
         return p.returncode
-    print("已提交给图形用户 launchd；需读回作业日志和辅助功能权限")
+    print(f"已提交给图形用户 launchd；辅助功能授权目标：{AX_BINARY}")
     return 0
 
 

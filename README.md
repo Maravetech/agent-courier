@@ -63,9 +63,12 @@ For an existing App session, install the target user's GUI receiver with
 on Mac3 (use `mac1-sun` or `mac2-moon` on the other machines). Then send with
 `python3 -I skills/courier/scripts/courier.py remote-ui-send --source mac1-sun
 --host mac3 --title 'exact session title' --file message.txt`. The receiver
-runs `ui-switch`, `ui-send`, and `wait` locally; it refuses if its Accessibility
+runs the native `switch` and `send` actions, then `wait` locally; it refuses if its Accessibility
 permission or the App state is unsuitable. Check its log in
 `~/.local/state/courier/<machine>-receiver.log` before using this channel.
+The receiver uses a native window-bound bridge at
+`~/.local/share/courier-runtime/courier-ax`; grant that executable macOS
+Accessibility permission on each machine before using existing App sessions.
 
 For automatic return delivery, use `dispatch --from-host mac1 --from-app codex
 --from-session <ID> --host mac2 --new --file body.txt`. Courier assigns a

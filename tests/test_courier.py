@@ -153,6 +153,18 @@ class CourierTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("已回投", r.stdout)
 
+    def test_dispatch_return_to_dsh_inbox(self):
+        import uuid
+        dispatch_id = str(uuid.uuid4())
+        payload = {"id": dispatch_id, "from_app": "dsh", "from_session": "2351",
+                   "source": "mac1", "target": "mac2", "target_session": TID,
+                   "message": f"【回复】mac2-moon-codex·new → mac1-sun-dsh·2351\n派单编号：{dispatch_id}\nOK\n"}
+        r = subprocess.run([sys.executable, "-I", SCRIPT, "dispatch-return"],
+                           input=json.dumps(payload, ensure_ascii=False), capture_output=True,
+                           text=True, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.run_cli("wait", "--dispatch-id", dispatch_id, "--timeout", "1")[0], 0)
+
 
 CID = "aaaaaaaa-1111-4222-8333-444444444444"
 
