@@ -413,6 +413,9 @@ def cmd_send(a):
     会话在 App 里开着时 Codex 会报 active writer，返回 4，改走界面通道。
     """
     import subprocess
+    import shutil
+    if getattr(a, "host", None):
+        return cmd_remote_send(a)
     if not os.path.isfile(a.file):
         print(f"正文文件不存在：{a.file}", file=sys.stderr)
         return 2
@@ -422,8 +425,12 @@ def cmd_send(a):
     os.makedirs(LOGDIR, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     log = os.path.join(LOGDIR, f"send-{stamp}.log")
+    codex_bin = shutil.which("codex") or os.path.expanduser("~/.local/bin/codex")
+    if not os.path.isfile(codex_bin):
+        print("找不到 Codex CLI", file=sys.stderr)
+        return 2
     if a.new:
-        argv = ["codex", "exec", "--skip-git-repo-check", "-s", a.sandbox, "-"]
+        argv = [codex_bin, "exec", "--skip-git-repo-check", "-s", a.sandbox, "-"]
         tid = None
     else:
         if not a.key:
@@ -431,7 +438,7 @@ def cmd_send(a):
             return 2
         d, _ = one(a.key)
         tid = d["id"]
-        argv = ["codex", "exec", "resume", tid, "-"]
+        argv = [codex_bin, "exec", "resume", tid, "-"]
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with open(a.file, "rb") as body, open(log, "wb") as out:
         subprocess.Popen(argv, stdin=body, stdout=out, stderr=subprocess.STDOUT,
@@ -453,6 +460,67 @@ def cmd_send(a):
                 return 0
     print(f"30 秒内没拿到 session id，看日志：{log}")
     return 1
+
+
+REMOTE_HOSTS = {"mac1": "mac1", "mac2": "mac2", "mac3": "mac3"}
+
+
+def cmd_remote_send(a):
+    """Use SSH for a remote Codex CLI session; never invoke remote AX from sshd."""
+    import subprocess
+    if a.host not in REMOTE_HOSTS or not a.new:
+        print("跨机命令仅支持 --host mac1|mac2|mac3 --new；已有 App 会话需要目标机图形接收作业。", file=sys.stderr)
+        return 2
+    if not os.path.isfile(a.file):
+        print(f"正文文件不存在：{a.file}", file=sys.stderr)
+        return 2
+    body = open(a.file, "rb").read()
+    if not has_header(body.decode("utf-8")):
+        print("拒发：正文缺投递抬头", file=sys.stderr)
+        return 2
+    # Fixed command and host allowlist: message text is passed only on stdin.
+    remote = "python3 -I ~/Documents/agent-courier/skills/courier/scripts/courier.py remote-receive --new"
+    result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                             REMOTE_HOSTS[a.host], remote], input=body,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=900)
+    sys.stdout.buffer.write(result.stdout)
+    sys.stderr.buffer.write(result.stderr)
+    return result.returncode
+
+
+def cmd_remote_receive(a):
+    """Read a bounded message from stdin and return the target's rollout reply."""
+    import re
+    import tempfile
+    import subprocess
+    body = sys.stdin.buffer.read(65537)
+    if len(body) > 65536 or not has_header(body.decode("utf-8")):
+        print("拒收：正文过大或缺投递抬头", file=sys.stderr)
+        return 2
+    os.makedirs(LOGDIR, mode=0o700, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=LOGDIR, prefix="remote-", delete=False) as f:
+        os.fchmod(f.fileno(), 0o600)
+        f.write(body)
+        path = f.name
+    try:
+        p = subprocess.run([sys.executable, "-I", os.path.realpath(__file__), "send", "--new",
+                            "--file", path], capture_output=True, text=True, timeout=45)
+        print(p.stdout, end="")
+        if p.returncode:
+            print(p.stderr, file=sys.stderr, end="")
+            return p.returncode
+        match = re.search(r"会话 ([0-9a-f-]{36})\s+SINCE=(\S+)", p.stdout)
+        if not match:
+            return 1
+        sid, since = match.groups()
+        w = subprocess.run([sys.executable, "-I", os.path.realpath(__file__), "wait", sid,
+                            "--since", since, "--timeout", "600"], capture_output=True,
+                           text=True, timeout=620)
+        print(w.stdout, end="")
+        print(w.stderr, file=sys.stderr, end="")
+        return w.returncode
+    finally:
+        os.unlink(path)
 
 
 # ---------------------------------------------------------------- 前端备用通道：cua-driver（纯无障碍接口，不截图）
@@ -604,8 +672,11 @@ def main():
     ud.set_defaults(fn=cmd_ui_send)
     n = sub.add_parser("send"); n.add_argument("key", nargs="?"); n.add_argument("--file", required=True)
     n.add_argument("--new", action="store_true"); n.add_argument("--cwd")
-    n.add_argument("--sandbox", default="workspace-write", choices=["read-only", "workspace-write"])
+    n.add_argument("--host", choices=sorted(REMOTE_HOSTS))
+    n.add_argument("--sandbox", default="workspace-write", choices=["read-only", "workspace-write", "danger-full-access"])
     n.set_defaults(fn=cmd_send)
+    rr = sub.add_parser("remote-receive", help=argparse.SUPPRESS)
+    rr.add_argument("--new", action="store_true"); rr.set_defaults(fn=cmd_remote_receive)
     a = ap.parse_args()
     global APP
     APP = a.app
