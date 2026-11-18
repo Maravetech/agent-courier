@@ -138,6 +138,21 @@ class CourierTest(unittest.TestCase):
         self.assertIn("派单编号：" + dispatch_id, out)
         self.assertIn("\nOK\n", out)
 
+    def test_dispatch_receive_does_not_repeat_returned_job(self):
+        import uuid
+        dispatch_id = str(uuid.uuid4())
+        payload = {"id": dispatch_id, "from_host": "mac1", "from_app": "codex",
+                   "from_session": TID, "host": "mac2", "target": None, "new": True,
+                   "body": "test", "stage": "returned", "target_session": TID2}
+        folder = os.path.join(self.tmp.name, "state", "dispatch")
+        os.makedirs(folder)
+        with open(os.path.join(folder, dispatch_id + ".json"), "w") as f:
+            json.dump(payload, f)
+        r = subprocess.run([sys.executable, "-I", SCRIPT, "dispatch-receive"],
+                           input=json.dumps(payload), capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("已回投", r.stdout)
+
 
 CID = "aaaaaaaa-1111-4222-8333-444444444444"
 

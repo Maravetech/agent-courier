@@ -564,6 +564,10 @@ def cmd_dispatch(a):
             print(result.stderr, file=sys.stderr, end="")
         if result.returncode == 0:
             record["stage"] = "returned"
+            import re
+            match = re.search(r"目标会话 ([0-9a-f-]{36})", result.stdout)
+            if match:
+                record["target_session"] = match.group(1)
             dispatch_save(path, record)
             return 0
         if result.returncode not in (1, 3, 4):
@@ -599,6 +603,9 @@ def cmd_dispatch_receive(a):
     if rec["stage"] == "returned":
         print(f"派单 {rec['id']} 已回投；目标会话 {rec.get('target_session')}")
         return 0
+    if rec["stage"] == "unknown":
+        print(f"派单 {rec['id']} 目标提交状态未知，需核目标记录后人工续接", file=sys.stderr)
+        return 3
     source_token = f"{MACHINE_NAMES[rec['from_host']]}-{rec['from_app']}·{rec['from_session'] or rec['id']}"
     target_token = f"{MACHINE_NAMES[rec['host']]}-codex·{rec['target'] or 'new'}"
     marker = f"派单编号：{rec['id']}"
@@ -844,9 +851,14 @@ def cmd_dispatch_status(a):
     if not os.path.isfile(path):
         return 1
     rec = json.load(open(path, encoding="utf-8"))
-    print(json.dumps({k: rec.get(k) for k in ("id", "stage", "from_host", "host",
-                                                 "target_session", "read_at", "replied_at", "returned_at")},
-                     ensure_ascii=False))
+    stages = ("accepted", "posted", "read", "replied", "returned")
+    stage = rec.get("stage")
+    level = stages.index(stage) if stage in stages else -1
+    view = {k: rec.get(k) for k in ("id", "stage", "from_host", "host",
+                                    "target_session", "read_at", "replied_at", "returned_at")}
+    view["回执"] = {"已投": level >= 1, "已读": level >= 2,
+                    "已回": level >= 3, "已回投": level >= 4}
+    print(json.dumps(view, ensure_ascii=False))
     return 0
 
 
@@ -1133,7 +1145,9 @@ SEND_LABELS = tuple(x for x in os.environ.get("COURIER_SEND_LABELS", "发送,Sen
 
 def cua(tool, args):
     import subprocess
-    r = subprocess.run(["cua-driver", "call", tool, json.dumps(args, ensure_ascii=False)],
+    import shutil
+    binary = shutil.which("cua-driver") or os.path.expanduser("~/.local/bin/cua-driver")
+    r = subprocess.run([binary, "call", tool, json.dumps(args, ensure_ascii=False)],
                        capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         raise RuntimeError(f"cua-driver {tool} 失败：{(r.stderr or r.stdout).strip()[:200]}")
@@ -1162,6 +1176,11 @@ def cua_front():
     return [a.get("name") for a in apps if a.get("active")]
 
 
+def codex_is_frontmost():
+    apps = json.loads(cua("list_apps", {}))["apps"]
+    return any(a.get("bundle_id") == CODEX_BUNDLE and a.get("active") for a in apps)
+
+
 def cua_tab(pid, wid):
     import re
     m = re.findall(r'AXRadioButton "([^"]+)"', cua_tree(pid, wid, "AXRadioButton"))
@@ -1186,6 +1205,9 @@ def cmd_ui_tab(a):
 def cmd_ui_switch(a):
     """后台点左侧会话按钮（按标题），切完核对标签页。"""
     import re
+    if codex_is_frontmost():
+        print("Codex App 在前台，拒绝切页")
+        return 2
     pid, wid = cua_target()
     before = cua_front()
     hits = re.findall(r'\[(\d+)\] AXButton "([^"]+)"', cua_tree(pid, wid, a.title))
@@ -1206,6 +1228,9 @@ def cmd_ui_send(a):
     body = open(a.file, encoding="utf-8").read().rstrip()
     if not has_header(body) and not internal_return_ok(body, getattr(a, "return_delivery", False)):
         print("拒发：正文第一行没有投递抬头。先用 compose 生成。", file=sys.stderr)
+        return 2
+    if codex_is_frontmost():
+        print("Codex App 在前台，拒绝写入")
         return 2
     pid, wid = cua_target()
     tab = cua_tab(pid, wid)
