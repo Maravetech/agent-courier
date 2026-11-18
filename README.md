@@ -56,6 +56,15 @@ The sender uses SSH; the target runs its local Codex CLI and returns the rollout
 reply. Hosts are limited to `mac1`, `mac2`, and `mac3`. This path creates a new
 session. Existing sessions open in the target Codex App require a local GUI
 receiver with Accessibility permission; SSH processes cannot use that permission.
+
+For an existing App session, install the target user's GUI receiver with
+`python3 -I skills/courier/scripts/courier.py receiver-install --machine mac3-stars`
+on Mac3 (use `mac1-sun` or `mac2-moon` on the other machines). Then send with
+`python3 -I skills/courier/scripts/courier.py remote-ui-send --source mac1-sun
+--host mac3 --title 'exact session title' --file message.txt`. The receiver
+runs `ui-switch`, `ui-send`, and `wait` locally; it refuses if its Accessibility
+permission or the App state is unsuitable. Check its log in
+`~/.local/state/courier/<machine>-receiver.log` before using this channel.
 ```
 
 Then go through **[PREREQUISITES.md](skills/courier/PREREQUISITES.md)** item by item: macOS permissions, turning on Computer use, approving Codex access, the CLI sign-in, and a self-check. Don't skip it.

@@ -441,6 +441,10 @@ def cmd_send(a):
         argv = [codex_bin, "exec", "resume", tid, "-"]
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with open(a.file, "rb") as body, open(log, "wb") as out:
+        route = os.environ.get("COURIER_ROUTE")
+        if route:
+            out.write(("route: " + route + "\n").encode("utf-8"))
+            out.flush()
         child_env = os.environ.copy()
         child_env["PATH"] = os.pathsep.join((os.path.expanduser("~/.local/bin"),
                                              "/usr/local/bin", "/opt/homebrew/bin",
@@ -467,6 +471,166 @@ def cmd_send(a):
 
 
 REMOTE_HOSTS = {"mac1": "mac1", "mac2": "mac2", "mac3": "mac3"}
+QUEUE_DIR = os.path.join(LOGDIR, "remote-queue")
+
+
+def cmd_remote_ui_send(a):
+    """Queue one existing App-session delivery for the target GUI user agent."""
+    import subprocess
+    import uuid
+    if a.host not in REMOTE_HOSTS or not os.path.isfile(a.file):
+        return 2
+    body = open(a.file, encoding="utf-8").read()
+    if not has_header(body):
+        print("拒发：正文缺投递抬头", file=sys.stderr)
+        return 2
+    job = {"id": str(uuid.uuid4()), "title": a.title, "body": body,
+           "source": a.source, "target": a.host,
+           "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    script = "python3 -I ~/Documents/agent-courier/skills/courier/scripts/courier.py"
+    put = subprocess.run(["ssh", "-o", "BatchMode=yes", a.host,
+                          script + " remote-enqueue"], input=json.dumps(job),
+                         text=True, capture_output=True, timeout=20)
+    if put.returncode:
+        print(put.stderr or put.stdout, file=sys.stderr)
+        return put.returncode
+    print(f"已入队：{job['source']} -> {job['target']} {job['id']}")
+    deadline = time.time() + a.timeout
+    while time.time() < deadline:
+        time.sleep(3)
+        get = subprocess.run(["ssh", "-o", "BatchMode=yes", a.host,
+                              script + " remote-result " + job["id"]],
+                             capture_output=True, text=True, timeout=20)
+        if get.returncode == 3:
+            continue
+        print(get.stdout, end="")
+        if get.stderr:
+            print(get.stderr, file=sys.stderr, end="")
+        return get.returncode
+    print("目标机接收作业超时；请求仍在队列中，勿盲目重发", file=sys.stderr)
+    return 3
+
+
+def cmd_remote_enqueue(a):
+    import uuid
+    raw = sys.stdin.buffer.read(65537)
+    if len(raw) > 65536:
+        return 2
+    try:
+        job = json.loads(raw)
+        uuid.UUID(job["id"])
+        if not all(isinstance(job[k], str) for k in ("title", "body", "source", "target")):
+            return 2
+        if not has_header(job["body"]) or not job["title"] or len(job["title"]) > 200:
+            return 2
+    except (ValueError, KeyError, TypeError):
+        return 2
+    os.makedirs(QUEUE_DIR, mode=0o700, exist_ok=True)
+    path = os.path.join(QUEUE_DIR, job["id"] + ".json")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return 2
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(job, f, ensure_ascii=False)
+    print(job["id"])
+    return 0
+
+
+def cmd_remote_result(a):
+    import uuid
+    try:
+        uuid.UUID(a.id)
+    except ValueError:
+        return 2
+    path = os.path.join(QUEUE_DIR, a.id + ".result.json")
+    if not os.path.isfile(path):
+        return 3
+    data = json.load(open(path, encoding="utf-8"))
+    print(data.get("output", ""), end="")
+    return data.get("code", 1)
+
+
+def cmd_receiver_serve(a):
+    """Run only as a per-user LaunchAgent in the target graphical session."""
+    import subprocess
+    import ctypes
+    os.makedirs(QUEUE_DIR, mode=0o700, exist_ok=True)
+    ax = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+    print(f"receiver {a.machine} pid={os.getpid()} accessibility={bool(ax.AXIsProcessTrusted())}", flush=True)
+    while True:
+        for name in sorted(os.listdir(QUEUE_DIR)):
+            if not name.endswith(".json") or name.endswith(".result.json"):
+                continue
+            path = os.path.join(QUEUE_DIR, name)
+            running = path + ".running"
+            try:
+                os.rename(path, running)
+            except FileNotFoundError:
+                continue
+            job = {"id": name[:-5]}
+            try:
+                job = json.load(open(running, encoding="utf-8"))
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=QUEUE_DIR,
+                                                 prefix="body-", delete=False) as f:
+                    f.write(job["body"])
+                    body_path = f.name
+                try:
+                    script = os.path.realpath(__file__)
+                    switch = subprocess.run([sys.executable, "-I", script, "ui-switch", job["title"]],
+                                            capture_output=True, text=True, timeout=90)
+                    if switch.returncode:
+                        code, output = switch.returncode, switch.stdout + switch.stderr
+                    else:
+                        sent = subprocess.run([sys.executable, "-I", script, "ui-send", "--file",
+                                               body_path, "--expect-tab", job["title"]],
+                                              capture_output=True, text=True, timeout=90)
+                        code, output = sent.returncode, switch.stdout + sent.stdout + sent.stderr
+                        if code == 0:
+                            waited = subprocess.run([sys.executable, "-I", script, "wait", job["title"],
+                                                     "--since", job["created"], "--timeout", "600"],
+                                                    capture_output=True, text=True, timeout=620)
+                            code = waited.returncode
+                            output += waited.stdout + waited.stderr
+                finally:
+                    os.unlink(body_path)
+            except Exception as exc:
+                code, output = 1, f"接收作业错误：{type(exc).__name__}: {exc}\n"
+            result = {"code": code, "output": output, "source": job.get("source"),
+                      "target": job.get("target"), "finished": time.time()}
+            with open(os.path.join(QUEUE_DIR, job["id"] + ".result.json"), "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False)
+            os.unlink(running)
+        time.sleep(2)
+
+
+def cmd_receiver_install(a):
+    import plistlib
+    import subprocess
+    if a.machine not in ("mac1-sun", "mac2-moon", "mac3-stars"):
+        return 2
+    label = f"com.crosslab.courier.{a.machine}.receiver"
+    agents = os.path.expanduser("~/Library/LaunchAgents")
+    os.makedirs(agents, exist_ok=True)
+    os.makedirs(LOGDIR, mode=0o700, exist_ok=True)
+    path = os.path.join(agents, label + ".plist")
+    data = {"Label": label,
+            "ProgramArguments": [sys.executable, "-I", os.path.realpath(__file__),
+                                 "receiver-serve", "--machine", a.machine],
+            "RunAtLoad": True, "KeepAlive": True,
+            "StandardOutPath": os.path.join(LOGDIR, f"{a.machine}-receiver.log"),
+            "StandardErrorPath": os.path.join(LOGDIR, f"{a.machine}-receiver-error.log")}
+    with open(path, "wb") as f:
+        plistlib.dump(data, f)
+    domain = f"gui/{os.getuid()}"
+    p = subprocess.run(["launchctl", "bootstrap", domain, path], capture_output=True, text=True)
+    print(f"作业：{label}  配置：{path}")
+    if p.returncode:
+        print(f"未启动：{p.stderr.strip()}", file=sys.stderr)
+        return p.returncode
+    print("已提交给图形用户 launchd；需读回作业日志和辅助功能权限")
+    return 0
 
 
 def cmd_remote_send(a):
@@ -507,6 +671,8 @@ def cmd_remote_receive(a):
         f.write(body)
         path = f.name
     try:
+        from_token, to_token = parse_header(body.decode("utf-8"))
+        os.environ["COURIER_ROUTE"] = f"{from_token} -> {to_token}"
         p = subprocess.run([sys.executable, "-I", os.path.realpath(__file__), "send", "--new",
                             "--file", path], capture_output=True, text=True, timeout=45)
         print(p.stdout, end="")
@@ -685,6 +851,20 @@ def main():
     n.set_defaults(fn=cmd_send)
     rr = sub.add_parser("remote-receive", help=argparse.SUPPRESS)
     rr.add_argument("--new", action="store_true"); rr.set_defaults(fn=cmd_remote_receive)
+    ru = sub.add_parser("remote-ui-send")
+    ru.add_argument("--host", choices=sorted(REMOTE_HOSTS), required=True)
+    ru.add_argument("--source", required=True)
+    ru.add_argument("--title", required=True)
+    ru.add_argument("--file", required=True)
+    ru.add_argument("--timeout", type=int, default=900)
+    ru.set_defaults(fn=cmd_remote_ui_send)
+    sub.add_parser("remote-enqueue", help=argparse.SUPPRESS).set_defaults(fn=cmd_remote_enqueue)
+    res = sub.add_parser("remote-result", help=argparse.SUPPRESS)
+    res.add_argument("id"); res.set_defaults(fn=cmd_remote_result)
+    srv = sub.add_parser("receiver-serve", help=argparse.SUPPRESS)
+    srv.add_argument("--machine", required=True); srv.set_defaults(fn=cmd_receiver_serve)
+    ins = sub.add_parser("receiver-install")
+    ins.add_argument("--machine", required=True); ins.set_defaults(fn=cmd_receiver_install)
     a = ap.parse_args()
     global APP
     APP = a.app
