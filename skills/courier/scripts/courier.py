@@ -450,7 +450,7 @@ def cmd_send(a):
             return 2
         d, _ = one(a.key)
         tid = d["id"]
-        argv = [codex_bin, "exec", "resume", tid, "-"]
+        argv = [codex_bin, "exec", "--skip-git-repo-check", "resume", tid, "-"]
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with open(a.file, "rb") as body, open(log, "wb") as out:
         route = os.environ.get("COURIER_ROUTE")
