@@ -526,6 +526,15 @@ def cmd_remote_enqueue(a):
     except (ValueError, KeyError, TypeError):
         return 2
     os.makedirs(QUEUE_DIR, mode=0o700, exist_ok=True)
+    status_path = os.path.join(QUEUE_DIR, "receiver-status.json")
+    try:
+        status = json.load(open(status_path, encoding="utf-8"))
+        if not status.get("accessibility") or time.time() - status.get("checked", 0) > 30:
+            print("目标机图形接收作业未获辅助功能授权或状态过期", file=sys.stderr)
+            return 5
+    except (OSError, ValueError, TypeError):
+        print("目标机图形接收作业状态无法取数", file=sys.stderr)
+        return 5
     path = os.path.join(QUEUE_DIR, job["id"] + ".json")
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -557,10 +566,18 @@ def cmd_receiver_serve(a):
     import ctypes
     os.makedirs(QUEUE_DIR, mode=0o700, exist_ok=True)
     ax = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
-    print(f"receiver {a.machine} pid={os.getpid()} accessibility={bool(ax.AXIsProcessTrusted())}", flush=True)
+    trusted = bool(ax.AXIsProcessTrusted())
+    print(f"receiver {a.machine} pid={os.getpid()} accessibility={trusted}", flush=True)
     while True:
+        trusted = bool(ax.AXIsProcessTrusted())
+        with open(os.path.join(QUEUE_DIR, "receiver-status.json"), "w", encoding="utf-8") as f:
+            json.dump({"machine": a.machine, "pid": os.getpid(), "accessibility": trusted,
+                       "checked": time.time()}, f)
+        if not trusted:
+            time.sleep(2)
+            continue
         for name in sorted(os.listdir(QUEUE_DIR)):
-            if not name.endswith(".json") or name.endswith(".result.json"):
+            if not name.endswith(".json") or name.endswith(".result.json") or name == "receiver-status.json":
                 continue
             path = os.path.join(QUEUE_DIR, name)
             running = path + ".running"
