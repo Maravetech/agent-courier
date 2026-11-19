@@ -1154,6 +1154,42 @@ class CourierTest(unittest.TestCase):
             self.assertEqual(courier.cmd_send(args), 5)
         start.assert_not_called()
 
+    def test_send_sandbox_default_is_inherited(self):
+        with patch.object(sys, "argv", [SCRIPT, "send", "--new", "--file", "body"]), \
+             patch.object(courier, "cmd_send", return_value=0) as send:
+            with self.assertRaises(SystemExit) as result:
+                courier.main()
+        self.assertEqual(result.exception.code, 0)
+        self.assertIsNone(send.call_args.args[0].sandbox)
+
+    def test_send_new_and_resume_sandbox_arguments(self):
+        body = Path(self.tmp.name, "sandbox-body.txt")
+        body.write_text("【投递】Claude Code·0007 → Codex·新建\nprobe", encoding="utf-8")
+
+        def capture_session(argv, **kwargs):
+            kwargs["stdout"].write(f"session id: {TID}\n".encode())
+            kwargs["stdout"].flush()
+
+        for sandbox, expected in ((None, ["codex", "exec", "--skip-git-repo-check", "-"]),
+                                  ("danger-full-access", ["codex", "exec", "--skip-git-repo-check", "-s", "danger-full-access", "-"])):
+            args = SimpleNamespace(file=str(body), new=True, key=None, sandbox=sandbox, cwd=None)
+            with self.subTest(new=sandbox), patch.object(courier, "overlay_check", return_value=0), \
+                 patch.object(courier.subprocess, "Popen", side_effect=capture_session) as start, \
+                 patch.object(courier.time, "sleep"):
+                self.assertEqual(courier.cmd_send(args), 0)
+                self.assertEqual(start.call_args.args[0], expected)
+
+        body.write_text("【投递】Claude Code·0007 → Codex·00159\nprobe", encoding="utf-8")
+        for sandbox, options in ((None, []), ("danger-full-access", ["-c", 'sandbox_mode="danger-full-access"'])):
+            args = SimpleNamespace(file=str(body), new=False, key=TID, sandbox=sandbox, cwd=None)
+            with self.subTest(resume=sandbox), patch.object(courier, "CODEX", self.tmp.name), \
+                 patch.object(courier, "INDEX", os.path.join(self.tmp.name, "session_index.jsonl")), \
+                 patch.object(courier, "overlay_check", return_value=0), \
+                 patch.object(courier.subprocess, "Popen", side_effect=capture_session) as start, \
+                 patch.object(courier.time, "sleep"):
+                self.assertEqual(courier.cmd_send(args), 0)
+                self.assertEqual(start.call_args.args[0], ["codex", "exec", "resume", *options, TID, "-"])
+
     def test_disconnected_link_refuses_ui_send_before_ui_touch(self):
         body = Path(self.tmp.name, "body-ui.txt")
         body.write_text("【投递】Claude Code·0007 → Codex·00159\nfixture", encoding="utf-8")
