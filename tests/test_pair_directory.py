@@ -59,6 +59,17 @@ print(String(decoding:data,as:UTF8.self))
         (self.root/'codex/session_index.jsonl').unlink()
         (self.root/'claude/account/workspace/local_102.json').write_text('{broken')
         self.assertEqual(self.read()['invalid'],0)
+    def test_index_keeps_latest_matching_row_after_malformed_and_unrelated_rows(self):
+        index = self.root/'codex/session_index.jsonl'
+        with index.open('a') as stream:
+            stream.write('\n{broken}\n\n')
+            for i in range(200):
+                stream.write(json.dumps(dict(id=str(i), thread_name=f'{50000+i} Unrelated'))+'\n')
+            stream.write(json.dumps(dict(id='00172', thread_name='00172 New title')))
+        data = self.read()
+        self.assertTrue(all(row['title'] == 'New title' for row in data['rows'] if row['number'] == '00172'))
+        self.assertEqual(data['invalid'],2)
+
     def test_cleanup_only_invalid_pairs_and_links(self):
         self.read('--clean')
         body=json.loads((self.root/'overlay/pairs.json').read_text())

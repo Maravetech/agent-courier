@@ -38,6 +38,12 @@ First time? Go through [`PREREQUISITES.md`](PREREQUISITES.md) and run its self-c
 | `--app claude send <full local CLI session ID> --file <body>` | Address one Claude Desktop session by its account-scoped `local_…` ID through one `claude -p` / `SendMessage` call; a running target may queue the message | 0 accepted, then verify / 2 refused / 5 uncertain |
 | `send <ID> --file <body>` or `send --new --file <body>` | CLI fallback via `codex exec` | 0 submitted / 4 session held by the app |
 
+`send` inherits the Codex CLI sandbox setting by default. Use `--sandbox read-only|workspace-write|danger-full-access` only when the task needs an explicit override; the override applies to new and resumed sessions.
+
+### 跨机派单
+
+第 0 步先运行 `ssh mac2 true` 和 `ssh mac3 true`，确认目标机可由当前环境访问。若退出码为 255，且错误含 `not permitted` 或 `could not resolve`，先报告当前投递会话可能受沙箱限制并检查 Codex 沙箱设置；不要据此判定为网络故障。
+
 Session numbers can repeat. **Always act on the session ID.**
 
 The back end is read-only and can read every session: open in the app, not open, or archived. Only the CLI `send` is limited by write locks.

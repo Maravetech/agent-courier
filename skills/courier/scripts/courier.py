@@ -910,11 +910,17 @@ def cmd_send(a):
     stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     log = os.path.join(LOGDIR, f"send-{stamp}.log")
     if a.new:
-        argv = ["codex", "exec", "--skip-git-repo-check", "-s", a.sandbox, "-"]
+        argv = ["codex", "exec", "--skip-git-repo-check"]
+        if a.sandbox:
+            argv += ["-s", a.sandbox]
+        argv += ["-"]
         tid = None
     else:
         tid = d["id"]
-        argv = ["codex", "exec", "resume", tid, "-"]
+        argv = ["codex", "exec", "resume"]
+        if a.sandbox:
+            argv += ["-c", f'sandbox_mode="{a.sandbox}"']
+        argv += [tid, "-"]
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with open(a.file, "rb") as body, open(log, "wb") as out:
         subprocess.Popen(argv, stdin=body, stdout=out, stderr=subprocess.STDOUT,
@@ -1728,7 +1734,7 @@ def main():
     check.add_argument("--to", required=True); check.set_defaults(fn=cmd_overlay_check)
     n = sub.add_parser("send"); n.add_argument("key", nargs="?"); n.add_argument("--file", required=True)
     n.add_argument("--new", action="store_true"); n.add_argument("--cwd")
-    n.add_argument("--sandbox", default="workspace-write", choices=["read-only", "workspace-write"])
+    n.add_argument("--sandbox", default=None, choices=["read-only", "workspace-write", "danger-full-access"])
     n.set_defaults(fn=cmd_send)
     a = ap.parse_args()
     if a.cmd == "wait" and not (a.text or a.since):
